@@ -117,11 +117,14 @@ type Course struct {
 type CourseSource interface {
     // CurrentTerms returns terms worth polling (current + next).
     CurrentTerms(ctx context.Context) ([]TermCode, error)
-    // Courses lists a term's catalog. Used to seed search.
+    // Courses lists a term's catalog. One request, ~7.1 MB, 7894 offerings. Seeds search.
     Courses(ctx context.Context, term TermCode) ([]Course, error)
-    // TermSections returns every section in a term — one upstream request.
-    TermSections(ctx context.Context, term TermCode) ([]SectionState, error)
-    // CourseSections returns sections for one course — one upstream request.
+    // ScheduledCourseIDs returns the courseIds that have classes in a term.
+    // One request; 2179 of 7295 for term 1269. Bounds the polling universe.
+    // NOTE: this is ClassSchedules/{term}, which returns ONLY ids, not enrollment.
+    ScheduledCourseIDs(ctx context.Context, term TermCode) ([]string, error)
+    // CourseSections returns every section of one course, with enrollment.
+    // One request covers all sections — the unit the poller schedules on.
     CourseSections(ctx context.Context, term TermCode, subject, catalog string) ([]SectionState, error)
 }
 ```
@@ -152,31 +155,44 @@ defaults to `mock` when `UW_API_KEY` is empty so the repo runs out of the box.
 
 ### Why the strategy differs most from UWFlow
 
-UWFlow issues one request per course and takes ~4 hours per sweep. The spec exposes
-`ClassSchedules/{termCode}`, which returns **an entire term in a single request**. One
-request therefore yields the current state of *every* watched section. That makes a
-60-second full sweep cost **1 request/minute** against a 120/minute budget.
+> **CORRECTED 2026-10-11 against the live API — see [VERIFIED.md](./VERIFIED.md) §2.**
+> This section originally proposed a bulk sweep built on `ClassSchedules/{termCode}`,
+> which I assumed returned every class in a term. **It does not.** It returns a flat
+> array of 2,179 courseId *strings* with no enrollment data. There is **no bulk
+> enrollment endpoint**. Enrollment is per-course only, so UWFlow's per-course approach
+> was the only option available, not a missed optimisation. The strategy below is the
+> corrected one.
 
-So the two-tier scheme:
+The win over UWFlow is therefore **scope and concurrency, not request count per course**.
+UWFlow sweeps 4 terms × every course unconditionally and serially, ~25–28k requests in
+~4 hours. notifco polls only what someone is actually watching.
 
-**Tier 1 — bulk sweep.** One `TermSections` call per active term per tick (default 60s).
-Covers every watched section regardless of how many there are. Cost is independent of
-subscription count, which is what makes 10k subscriptions cheap.
+The decisive efficiency fact (VERIFIED.md §3): **one request returns every section of a
+course.** A user watching `LEC 001`, `LAB 101` and `TST 201` of CS 341 costs *one*
+request, not three. So the poller deduplicates watched sections to distinct
+`(term, course)` pairs before scheduling anything.
 
-**Tier 2 — hot sections.** Sections that are *interesting* get an extra targeted
-`CourseSections` call on a tighter interval (default 15s). A section is hot when it is
-full, has watchers, and has recently churned. Capped by `NOTIFCO_HOT_MAX` so the budget
-is bounded.
+**Tier 1 — watched sweep.** One `CourseSections` call per distinct watched course per
+tick (default 60s), via `ClassSchedules/{term}/{subject}/{catalog}` — which takes the
+course code directly, no courseId resolution. Cost = distinct watched courses, which is
+bounded by how many courses users actually watch, not by subscription count.
 
-Both tiers emit jobs into one priority queue drained by one worker pool through one
-rate limiter, so the global ceiling holds no matter how the tiers are tuned.
+**Tier 2 — hot courses.** Courses containing a full, watched, recently-churning section
+get a tighter interval (default 15s). Capped by `NOTIFCO_HOT_MAX` so the budget stays
+bounded.
 
-> **Unverified assumption.** I could not measure the payload size or latency of
-> `ClassSchedules/{termCode}` without an API key. If it proves too large or too slow,
-> `NOTIFCO_POLL_STRATEGY=per-course` switches Tier 1 to per-watched-course requests
-> (budget then scales with distinct watched courses, roughly 110/min ÷ courses). The
-> interface is identical, so only the scheduler changes. This is a config flip, not a
-> rewrite.
+Both tiers emit jobs into one priority queue drained by one worker pool through one rate
+limiter, so the global ceiling holds however the tiers are tuned.
+
+**Measured budget** (VERIFIED.md §6). A full-term sweep is 2,179 requests. Watched-only
+at a 60s target supports ~120 distinct courses at the documented 120 req/min, and ~400 at
+the ~409 req/min actually observed. Default pacing stays at the documented 120 because
+the docs call the limit experimental; the observed headroom is treated as safety margin,
+not budget.
+
+`ClassSchedules/{termCode}` is retained but repurposed: one request enumerates which
+courses have classes this term (2,179 of 7,295 catalog courseIds), bounding the polling
+universe and validating `/watch` targets.
 
 ### Worker pool
 
@@ -500,12 +516,12 @@ UW_API_KEY              optional — absent ⇒ mock source
 NOTIFCO_SOURCE          uwapi | mock          (default: mock if no key)
 DATABASE_URL            postgres://...
 REDIS_URL               redis://...
-NOTIFCO_POLL_STRATEGY   bulk | per-course     (default bulk)
 NOTIFCO_POLL_INTERVAL   60s
 NOTIFCO_HOT_INTERVAL    15s
+NOTIFCO_HOT_MAX         50
 NOTIFCO_POLL_WORKERS    4
 NOTIFCO_NOTIFY_WORKERS  8
-NOTIFCO_RATE_LIMIT      110          # req/min, under the published 120
+NOTIFCO_RATE_LIMIT      120          # req/min, the documented cap (~409 observed; margin, not budget)
 NOTIFCO_COOLDOWN        30m
 METRICS_ADDR            :9090
 ```
@@ -605,7 +621,9 @@ notifco/
 
 | Decision | Why |
 |---|---|
-| Bulk term endpoint as the default sweep | Makes polling cost independent of subscription count. The single largest win over UWFlow. |
+| ~~Bulk term endpoint as the default sweep~~ | **Retracted.** No bulk enrollment endpoint exists (VERIFIED.md §2). Poll per course, deduplicated to distinct watched courses. |
+| One request per course, not per section | Measured: a single call returns every section of a course. Watching 3 sections of CS 341 costs 1 request. |
+| Default pacing 120 req/min despite ~409 observed | The docs call the limit experimental and send no rate-limit headers. Observed headroom is margin, not budget. |
 | Redis for differ state, not Postgres | Decouples detection from the catalog write path — the coupling that caps UWFlow's poll rate. |
 | Idempotency enforced by a Postgres unique constraint | Redis loss degrades detection but can never cause duplicate sends. |
 | `(subscription_id, transition_id)` as the key | Stable across restarts, unlike a timestamp or payload hash. |
@@ -613,12 +631,15 @@ notifco/
 | One binary, `all` mode | Free tier means one small VM. Splitting processes is a scaling option, not a starting point. |
 | Mock source is the default | The repo must be runnable, testable, and CI-green with no API key. |
 
-**The risk**: the default strategy rests on `ClassSchedules/{termCode}` being a usable
-bulk endpoint, which I could not verify without a key. `NOTIFCO_POLL_STRATEGY=per-course`
-is the escape hatch and the interface absorbs the change, but if the bulk endpoint is
-unusable then the per-course budget (~110 req/min ÷ distinct watched courses) becomes the
-real constraint on interval, and the 60s target holds only up to roughly 100 distinct
-watched courses. I will measure and state this in the README once a key is available.
+**The risk, now resolved.** The earlier draft rested on `ClassSchedules/{termCode}` being
+a usable bulk endpoint, which I could not verify without a key. I have since registered a
+key and tested it: **the assumption was wrong**, and the escape hatch I designed for is
+now the only path. The measured consequence is that a 60s interval supports roughly 120
+distinct watched courses at the documented rate — almost exactly the ~100 I predicted in
+the original version of this section.
+
+Remaining unverified: I never triggered a 429, so whether it carries `Retry-After` is
+unconfirmed. The backoff handles both cases.
 
 ---
 

@@ -1,0 +1,212 @@
+# Verified API Measurements
+
+Everything here was measured against the live UW Open Data API v3 on **2026-10-11** with
+a real registered key. This supersedes any inference in NOTES.md or DESIGN.md that
+disagrees with it. The headline item is that **my central design assumption was wrong**;
+see §2.
+
+Key registered via the documented flow:
+
+```
+POST /v3/account/register   email=<redacted>  project=notifco  uri=https://github.com/vhzhen/notifco
+-> HTTP 200 {"message":"Registration successful, your API key is <redacted>", ...}
+```
+
+No email confirmation step was required — the key worked on the very next request. (The
+UWFlow README describes a two-step register-then-confirm flow; that is no longer
+accurate, or no longer enforced.) Auth header is `x-api-key`.
+
+---
+
+## 1. Current term
+
+```
+GET /v3/Terms/current  ->  200
+{"termCode":"1269","name":"Fall 2026","nameShort":"2026 F",
+ "termBeginDate":"2026-09-01T00:00:00","termEndDate":"2026-12-31T00:00:00",
+ "sixtyPercentCompleteDate":null,"associatedAcademicYear":0}
+```
+
+Confirms UWFlow's term-id arithmetic (`(year-1900)*10 + season`): Fall 2026 = `1269`.
+Also confirms their complaint in `parts/term/struct.go` — `termBeginDate`/`termEndDate`
+are snapped to month boundaries (Sep 1 / Dec 31), useless for real lecture dates, which
+is why they use `ImportantDates` instead.
+
+---
+
+## 2. `ClassSchedules/{termCode}` is an INDEX, not a bulk data dump
+
+**This invalidates the primary optimisation in DESIGN.md §4.**
+
+```
+GET /v3/ClassSchedules/1269  ->  200   19,612 bytes   0.18 s
+```
+
+I assumed this returned every `Class` object for the term. It does not. It returns a flat
+JSON **array of 2,179 six-digit courseId strings**:
+
+```json
+["013912","015796","003845","013368","013864","009328", ...]
+```
+
+All 2,179 entries are 6 characters. No enrollment data whatsoever. The OpenAPI spec was
+telling the truth with `{"type":"array","items":{"type":"string"}}` — I read that as the
+spec being sloppily typed, since the sibling endpoints return objects. It was literal.
+
+**Consequence**: there is no bulk enrollment endpoint. Enrollment can only be read
+per-course. UWFlow's per-course approach was not a missed optimisation — it is the only
+option the API offers. My NOTES.md §6 claim that their ~4-hour sweep was "self-inflicted"
+was wrong on this point; the fixable part of their cost is concurrency and scope, not
+request count per course.
+
+What the endpoint *is* good for: it cheaply enumerates which courses actually have
+classes in a term. Only **2,179 of 7,295** distinct courseIds in the catalog have
+schedules in 1269, so it bounds the polling universe at 2,179 rather than 7,295, for one
+request.
+
+---
+
+## 3. Per-course enrollment — both forms work
+
+### By subject + catalog number (no courseId lookup needed)
+
+```
+GET /v3/ClassSchedules/1269/CS/341  ->  200   5,884 bytes   0.77 s
+```
+
+7 sections, real enrollment:
+
+| classNumber | component | classSection | enrolled / capacity |
+|---|---|---|---|
+| 6003 | LEC | 1 | 83 / 100 |
+| 6546 | LEC | 2 | 99 / 100 |
+| 6547 | LEC | 3 | 86 / 100 |
+| 6358 | LAB | 101 | 99 / 100 |
+| 6438 | LAB | 102 | 83 / 100 |
+| 5934 | LAB | 103 | 86 / 100 |
+| 6549 | TST | 201 | 268 / 300 |
+
+This form is ideal for the bot: a user types `CS 341` and it maps straight to a request,
+with no courseId resolution step. UWFlow does not use it.
+
+### By courseId
+
+```
+GET /v3/ClassSchedules/1269/013912  ->  200   783 bytes   0.34 s
+```
+
+Also returns full enrollment. Needed only for cross-listed handling, where one courseId
+spans several course codes distinguished by `courseOfferNumber`.
+
+### Important batching property
+
+**One request returns every section of a course.** A user watching `LEC 001`, `LAB 101`,
+and `TST 201` of CS 341 costs **one** request, not three. The poller must therefore
+deduplicate watched sections down to distinct `(term, course)` pairs. This is the single
+most important efficiency fact for sizing the poller.
+
+Also note `classSection` is the real section number as an integer (`1`, `101`, `201`),
+not a sequential index, so UWFlow's zero-pad-to-3 to build `LEC 001` / `LAB 101` is
+correct.
+
+---
+
+## 4. Catalog: one request for everything
+
+```
+GET /v3/Courses/1269  ->  200   7,134,495 bytes (7.1 MB)   0.60 s
+```
+
+- **7,894** course offerings, **7,295** distinct courseIds, **215** distinct subjects.
+- Fields: `courseId, courseOfferNumber, termCode, termName, associatedAcademicCareer,`
+  `associatedAcademicGroupCode, associatedAcademicOrgCode, subjectCode, catalogNumber,`
+  `title, descriptionAbbreviated, description, gradingBasis, courseComponentCode,`
+  `enrollConsentCode, enrollConsentDescription, dropConsentCode, dropConsentDescription,`
+  `requirementsDescription`
+
+7.1 MB in 0.6 s is entirely practical to pull once daily to seed `/course search`. Course
+*metadata* is bulk-available; only *enrollment* is not.
+
+---
+
+## 5. Rate limits — the published figure is not what is enforced
+
+Measured: **150 sequential requests in 22 s (~409 req/min). Zero 429s.**
+
+I stopped there rather than hunt for the true ceiling; the point was whether 120/min is a
+hard wall, and it is not. This matters because UWFlow paces itself at ~109 req/min with a
+fixed 550 ms sleep, which appears to be roughly 4× more conservative than necessary.
+
+**No rate-limit headers are returned.** Full header set on a 200:
+
+```
+content-type, date, server: Microsoft-IIS/10.0, set-cookie: ARRAffinity...,
+strict-transport-security, x-powered-by: ASP.NET
+```
+
+No `X-RateLimit-*`, no `Retry-After`, nothing. A client cannot discover its remaining
+quota and must self-pace and react to 429s blind.
+
+**Unverified**: I never triggered a 429, so I could not confirm whether it carries
+`Retry-After`. The backoff must handle both cases. UWFlow's client reads `Retry-After`
+and falls back to a flat 61 s.
+
+### Design stance
+
+Default to the **documented 120 req/min**, not the ~409 observed. The docs say the limit
+is per-key and explicitly "experimenting with an implementation", so observed headroom
+today is not a contract. Make it configurable, and treat the measured headroom as safety
+margin rather than budget to spend.
+
+---
+
+## 6. Corrected polling budget
+
+A full enrollment sweep of an entire term is **2,179 requests** (§2), one per course with
+classes:
+
+| Pacing | Full-term sweep | Watched-only, 60 s target |
+|---|---|---|
+| 120 req/min (documented, default) | ~18 min | ~120 distinct courses |
+| 400 req/min (observed, not a contract) | ~5.5 min | ~400 distinct courses |
+
+Compare UWFlow: ~25–28k requests and ~4 hours, because it sweeps 4 terms × every course
+unconditionally and serially. Polling only watched courses, at one request per course
+regardless of section count, is what delivers the latency win — not a bulk endpoint,
+which does not exist.
+
+This lands almost exactly on the risk I flagged in DESIGN.md §13: "if the bulk endpoint
+is unusable then the 60 s target holds only up to roughly 100 distinct watched courses."
+Measured answer: ~120 at the documented rate.
+
+---
+
+## 7. Fixtures captured
+
+Real responses saved to `internal/source/testdata/` for the mock source and tests:
+
+| File | Contents |
+|---|---|
+| `classschedules_1269_CS_341.json` | 7 real CS 341 sections with enrollment (full response) |
+| `terms_current.json` | `Terms/current` response |
+| `courses_1269_slice.json` | 40 CS/MATH/STAT/ECE courses (7.1 MB trimmed to be committable) |
+| `classschedules_1269_courseids_slice.json` | First 50 of the 2,179 courseIds |
+
+Verified key-free before commit.
+
+---
+
+## 8. What changes in the design
+
+| DESIGN.md said | Corrected |
+|---|---|
+| Tier 1 = one bulk `ClassSchedules/{term}` sweep covering all watched sections | **No bulk enrollment endpoint exists.** Poll per course. |
+| Poll cost independent of subscription count | Cost scales with **distinct watched courses** (not sections) |
+| `NOTIFCO_POLL_STRATEGY=per-course` is the fallback | per-course is now the **only** strategy; the flag is removed |
+| 120 req/min is a hard ceiling | ~409/min observed; keep 120 as a polite self-imposed default |
+| `ClassSchedules/{term}` is the sweep | Repurposed: a 1-request index of which courses have classes |
+
+Unchanged and still correct: the differ's full→open rule and the capacity-increase bug
+fix (NOTES.md §3), Redis last-seen state, the Postgres outbox with retries and
+dead-lettering, the `(subscription_id, transition_id)` idempotency key, grouping one
+request per course, and the adaptive interval.

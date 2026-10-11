@@ -425,10 +425,16 @@ between a useful alert and a historical record.
 
 1. **Daily full-catalog crawl.** Dominates latency. Spends ~25k requests/day re-reading
    courses nobody watches, while the watched ones wait in line.
-2. **Per-course requests when a per-term bulk endpoint exists.** `ClassSchedules/{termCode}`
-   makes the entire crawl one request. UWFlow's ~4-hour run is self-inflicted.
-3. **No concurrency.** Strictly `time.Sleep(550ms)` serial, far under the 120 req/min cap
-   it is pacing against.
+2. ~~**Per-course requests when a per-term bulk endpoint exists.**~~ **Retracted after
+   live testing — see [VERIFIED.md](./VERIFIED.md) §2.** I assumed `ClassSchedules/{termCode}`
+   returned an entire term's classes. It returns only an array of courseId strings with
+   no enrollment data. **There is no bulk enrollment endpoint**, so UWFlow's per-course
+   requests are the only option the API offers, not a missed optimisation. Their fixable
+   cost is *scope* (4 terms × every course, watched or not) and *serialism*, not requests
+   per course.
+3. **No concurrency.** Strictly `time.Sleep(550ms)` serial. Measured against the live API,
+   150 sequential requests completed in 22 s (~409 req/min) with zero 429s, so this pacing
+   is roughly 4× more conservative than the service currently tolerates (VERIFIED.md §5).
 4. **The capacity-increase bug** in §3 silently drops a whole class of real openings.
 5. **No retry on delivery.** A transient SMTP blip loses the alert until tomorrow.
 6. **Send inside the transaction, errors kill the listener.** Fragile and unbounded.
@@ -447,9 +453,9 @@ between a useful alert and a historical record.
 
 | UWFlow | notifco |
 |---|---|
-| Daily cron, whole catalog | Continuous poller, **only watched sections**, adaptive interval |
-| 1 request per course | `ClassSchedules/{termCode}` bulk snapshot + per-course for hot sections |
-| Sequential, 550ms sleep | Worker pool + token-bucket limiter sized to 120 req/min |
+| Daily cron, whole catalog | Continuous poller, **only watched courses**, adaptive interval |
+| 4 terms × every course, watched or not | Current + next term, deduplicated to distinct **watched** courses (1 request covers all sections of a course) |
+| Sequential, 550ms sleep (~109 req/min) | Worker pool + token bucket at the documented 120 req/min (~409 measured as available headroom) |
 | `old.total >= new.capacity` | `old.total >= old.capacity && new.total < new.capacity` |
 | Last-seen state = serving table | Last-seen state in Redis, independent of serving data |
 | Detection inside importer's UPDATE | Standalone differ, pollable at any frequency |
