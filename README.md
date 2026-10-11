@@ -63,7 +63,7 @@ Full analysis of UWFlow is in [NOTES.md](./NOTES.md); the design is in
                                   │ send happens OUTSIDE the transaction
    ┌──────────────────────────────▼────────────────────────────────────────────────┐
    │ DISCORD (discordgo)                                                           │
-   │  /course search · /watch · /unwatch · /watchlist   (ephemeral, autocompleted) │
+   │  /search · /watch · /unwatch · /watchlist          (ephemeral, autocompleted) │
    │  deliver: DM ──(50007 DMs closed)──► channel ping that names no course        │
    └──────────────────────────────┬────────────────────────────────────────────────┘
                                   │
@@ -216,7 +216,7 @@ suite proves tests and failure modes don't intersect, not that the code is right
 
 ### Prerequisites
 
-- Go 1.24+, or just Docker
+- Go 1.26+, or just Docker
 - Postgres 16 and Redis 7+ (docker-compose provides both)
 - A Discord bot token
 - Optionally a UW Open Data API key — **without one it runs on fixtures**
@@ -276,7 +276,7 @@ is exactly how CI runs, with no secrets.
 
 | Command | What it does |
 |---|---|
-| `/course search <code>` | Section list with live seat counts. Fetches on demand if nobody has watched the course before. |
+| `/search <code>` | Section list with live seat counts. Fetches on demand if nobody has watched the course before. |
 | `/watch <code> [section]` | Watch one section, or every section of the course if `section` is omitted. Autocompleted. |
 | `/unwatch <code> [section]` | Stop watching one section, or the whole course. Also cancels any undelivered alert. |
 | `/watchlist` | Your active watches with current seat counts. |

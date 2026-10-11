@@ -1,6 +1,10 @@
-# Build stage. CGO is off so the result runs on a scratch-ish base and on the
-# ARM free-tier VMs this is meant to be deployed to.
-FROM golang:1.24-alpine AS build
+# Build stage. CGO is off so the result runs on a minimal base and on the ARM
+# free-tier VMs this is meant to be deployed to.
+#
+# The tag must satisfy the `go` directive in go.mod (currently 1.26.0). The
+# official Go images set GOTOOLCHAIN=local, so an older base will NOT silently
+# download a newer toolchain — it just fails.
+FROM golang:1.27-alpine AS build
 
 WORKDIR /src
 

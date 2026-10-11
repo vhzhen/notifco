@@ -21,7 +21,7 @@ CREATE TABLE IF NOT EXISTS users (
     created_at          TIMESTAMPTZ NOT NULL DEFAULT NOW()
 );
 
--- Catalog cache. Powers /course search and gives subscriptions a stable FK.
+-- Catalog cache. Powers /search and gives subscriptions a stable FK.
 CREATE TABLE IF NOT EXISTS sections (
     id            BIGSERIAL PRIMARY KEY,
     term_code     TEXT        NOT NULL,

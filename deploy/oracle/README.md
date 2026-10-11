@@ -110,7 +110,7 @@ curl -s localhost:9090/metrics | grep notifco_ | head
 docker compose ps                                     # all healthy
 ```
 
-In Discord: `/course search CS 341`, then `/watch CS 341 LEC 002`.
+In Discord: `/search CS 341`, then `/watch CS 341 LEC 002`.
 
 ## 5. Survive reboots
 

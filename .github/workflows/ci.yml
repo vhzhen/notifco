@@ -51,7 +51,9 @@ jobs:
 
       - uses: actions/setup-go@v5
         with:
-          go-version: '1.24'
+          # Must satisfy the `go` directive in go.mod. Pinning it avoids
+          # relying on GOTOOLCHAIN auto-download at build time.
+          go-version: '1.27'
           cache: true
 
       - name: Verify module checksums

@@ -74,18 +74,14 @@ func (b *Bot) Session() *discordgo.Session { return b.session }
 func commands() []*discordgo.ApplicationCommand {
 	return []*discordgo.ApplicationCommand{
 		{
-			Name:        "course",
-			Description: "Look up UW courses",
+			Name:        "search",
+			Description: "Search UW courses and see live seat counts",
 			Options: []*discordgo.ApplicationCommandOption{{
-				Name:        "search",
-				Description: "Search for a course by code or title",
-				Type:        discordgo.ApplicationCommandOptionSubCommand,
-				Options: []*discordgo.ApplicationCommandOption{{
-					Name:        "code",
-					Description: "Course code or title, e.g. CS 341",
-					Type:        discordgo.ApplicationCommandOptionString,
-					Required:    true,
-				}},
+				Name:         "code",
+				Description:  "Course code or title, e.g. CS 341",
+				Type:         discordgo.ApplicationCommandOptionString,
+				Required:     true,
+				Autocomplete: true,
 			}},
 		},
 		{
@@ -202,8 +198,8 @@ func (b *Bot) handleCommand(ctx context.Context, s *discordgo.Session, i *discor
 			}
 		}()
 		switch data.Name {
-		case "course":
-			msg, err = b.cmdCourseSearch(ctx, data)
+		case "search":
+			msg, err = b.cmdSearch(ctx, data)
 		case "watch":
 			msg, err = b.cmdWatch(ctx, i, data)
 		case "unwatch":
@@ -239,13 +235,10 @@ func optString(opts []*discordgo.ApplicationCommandInteractionDataOption, name s
 	return ""
 }
 
-func (b *Bot) cmdCourseSearch(ctx context.Context, data discordgo.ApplicationCommandInteractionData) (string, error) {
-	if len(data.Options) == 0 {
-		return "Usage: `/course search <code>`", nil
-	}
-	query := optString(data.Options[0].Options, "code")
+func (b *Bot) cmdSearch(ctx context.Context, data discordgo.ApplicationCommandInteractionData) (string, error) {
+	query := optString(data.Options, "code")
 	if strings.TrimSpace(query) == "" {
-		return "Give me a course code, e.g. `CS 341`.", nil
+		return "Give me a course code, e.g. `/search CS 341`.", nil
 	}
 
 	// If the query looks like a full course code, fetch it on demand so search
@@ -278,7 +271,7 @@ func (b *Bot) cmdCourseSearch(ctx context.Context, data discordgo.ApplicationCom
 		fmt.Fprintf(&sb, "- `%s` %s — %d section(s), %d with seats\n",
 			strings.ToUpper(h.CourseCode), h.CourseTitle, h.Sections, h.OpenSections)
 	}
-	sb.WriteString("\nUse `/course search <exact code>` for section detail.\n")
+	sb.WriteString("\nUse `/search <exact code>` for section detail.\n")
 	sb.WriteString(disclaimer)
 	return sb.String(), nil
 }

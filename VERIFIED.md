@@ -124,7 +124,7 @@ GET /v3/Courses/1269  ->  200   7,134,495 bytes (7.1 MB)   0.60 s
   `enrollConsentCode, enrollConsentDescription, dropConsentCode, dropConsentDescription,`
   `requirementsDescription`
 
-7.1 MB in 0.6 s is entirely practical to pull once daily to seed `/course search`. Course
+7.1 MB in 0.6 s is entirely practical to pull once daily to seed `/search`. Course
 *metadata* is bulk-available; only *enrollment* is not.
 
 ---

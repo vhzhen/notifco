@@ -67,7 +67,7 @@ Non-goals: registering users in courses, anything touching Quest, waitlist posit
                                │
    ┌───────────────────────────▼──────────────────────────────────────────────────┐
    │ DISCORD (discordgo)                                                          │
-   │  slash cmds: /course search · /watch · /unwatch · /watchlist                 │
+   │  slash cmds: /search · /watch · /unwatch · /watchlist                        │
    │  deliver: DM ──(50007 DMs closed)──► fallback channel ping                   │
    └──────────────────────────────────────────────────────────────────────────────┘
                                │
@@ -405,7 +405,7 @@ CREATE TABLE users (
   created_at         TIMESTAMPTZ NOT NULL DEFAULT NOW()
 );
 
--- Catalog cache. Powers /course search and gives subscriptions a stable FK.
+-- Catalog cache. Powers /search and gives subscriptions a stable FK.
 CREATE TABLE sections (
   id            BIGSERIAL PRIMARY KEY,
   term_code     TEXT    NOT NULL,
@@ -470,7 +470,7 @@ replaceable: losing it degrades detection for one poll cycle and cannot cause du
 
 | Command | Behaviour |
 |---|---|
-| `/course search <code>` | Searches the `sections` cache by course code (and title, trigram). Shows each section with `enrolled/capacity`, component, online flag, and an "as of" timestamp. Ephemeral. |
+| `/search <code>` | Searches the `sections` cache by course code (and title, trigram). Shows each section with `enrolled/capacity`, component, online flag, and an "as of" timestamp. Ephemeral. |
 | `/watch <code> <section>` | Resolves `(course, section)` for the active term, upserts user + subscription. Autocompletes `<section>` from the cache. Confirms with current seat state and the staleness disclaimer. |
 | `/unwatch <code> [section]` | Deactivates one subscription, or all sections of the course when `section` is omitted. |
 | `/watchlist` | Lists the caller's active subscriptions with live seat counts. Ephemeral. |

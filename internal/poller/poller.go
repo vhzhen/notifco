@@ -450,7 +450,7 @@ func (p *Poller) NextInterval(tier Tier, noChange int) time.Duration {
 	return p.intervalLocked(tier, noChange)
 }
 
-// SeedCatalog populates the sections table for a term so /course search and
+// SeedCatalog populates the sections table for a term so /search and
 // /watch work before anyone is subscribed.
 //
 // Strategy reflects what the API actually offers: the catalog comes in one
@@ -466,7 +466,7 @@ func (p *Poller) SeedCatalog(ctx context.Context, term source.TermCode) error {
 }
 
 // EnsureCourse fetches and stores one course's sections on demand. Called by
-// /watch and /course search so a user can subscribe to a course nobody has
+// /watch and /search so a user can subscribe to a course nobody has
 // watched before.
 func (p *Poller) EnsureCourse(ctx context.Context, term source.TermCode, courseCode string) ([]source.SectionState, error) {
 	subject, catalog, err := source.SplitCourseCode(courseCode)
