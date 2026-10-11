@@ -30,3 +30,6 @@ go.work.sum
 .idea/
 .vscode/
 *.swp
+
+# Load test output
+load-results.txt

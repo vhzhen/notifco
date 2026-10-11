@@ -1,0 +1,93 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+    branches: [main]
+
+# No secrets are needed: CI runs entirely against the mock source backed by
+# real captured API responses. That is the point of the CourseSource interface.
+permissions:
+  contents: read
+
+jobs:
+  test:
+    name: build, lint, test
+    runs-on: ubuntu-latest
+
+    services:
+      postgres:
+        image: postgres:16-alpine
+        env:
+          POSTGRES_USER: notifco
+          POSTGRES_PASSWORD: notifco
+          POSTGRES_DB: notifco_test
+        ports:
+          - 5432:5432
+        options: >-
+          --health-cmd "pg_isready -U notifco -d notifco_test"
+          --health-interval 5s
+          --health-timeout 5s
+          --health-retries 10
+
+      redis:
+        image: redis:7-alpine
+        ports:
+          - 6379:6379
+        options: >-
+          --health-cmd "redis-cli ping"
+          --health-interval 5s
+          --health-timeout 3s
+          --health-retries 10
+
+    env:
+      TEST_DATABASE_URL: postgres://notifco:notifco@localhost:5432/notifco_test?sslmode=disable
+      TEST_REDIS_URL: redis://localhost:6379/15
+      REDIS_URL: redis://localhost:6379/15
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-go@v5
+        with:
+          go-version: '1.24'
+          cache: true
+
+      - name: Verify module checksums
+        run: go mod verify
+
+      - name: gofmt
+        run: |
+          out=$(gofmt -s -l .)
+          if [ -n "$out" ]; then
+            echo "These files are not gofmt-clean:"
+            echo "$out"
+            exit 1
+          fi
+
+      - name: go vet
+        run: go vet ./...
+
+      - name: staticcheck
+        uses: dominikh/staticcheck-action@v1
+        with:
+          version: latest
+          install-go: false
+
+      - name: Build
+        run: go build -trimpath ./...
+
+      - name: Test (race)
+        run: go test -race -count=1 ./...
+
+      - name: Load test (10k subscriptions)
+        run: go test -tags=load -count=1 -v -timeout=600s ./test/load/
+
+  docker:
+    name: docker build
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Build image
+        run: docker build -t notifco:ci .
