@@ -115,7 +115,7 @@ func TestLoadTenThousandSubscriptions(t *testing.T) {
 		redisURL = "redis://localhost:6379/15"
 	}
 
-	st, err := store.Open(ctx, dsn)
+	st, err := store.Open(ctx, dsn, 8)
 	if err != nil {
 		t.Skipf("postgres unavailable (%v)", err)
 	}
@@ -338,7 +338,7 @@ func TestLoadThroughputWithRealisticDiscordCost(t *testing.T) {
 		redisURL = "redis://localhost:6379/15"
 	}
 
-	st, err := store.Open(ctx, dsn)
+	st, err := store.Open(ctx, dsn, 8)
 	if err != nil {
 		t.Skipf("postgres unavailable (%v)", err)
 	}

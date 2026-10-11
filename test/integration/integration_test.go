@@ -52,7 +52,7 @@ func newHarness(t *testing.T) *harness {
 	}
 
 	ctx := context.Background()
-	st, err := store.Open(ctx, dsn)
+	st, err := store.Open(ctx, dsn, 8)
 	if err != nil {
 		t.Skipf("postgres unavailable (%v); skipping integration test", err)
 	}

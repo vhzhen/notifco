@@ -26,15 +26,19 @@ type Store struct {
 }
 
 // Open connects to Postgres and verifies the connection.
-func Open(ctx context.Context, dsn string) (*Store, error) {
+//
+// maxConns caps the pool. Each Postgres backend costs memory, so on a 1 GB
+// free-tier VM this wants to be small (4-8) rather than the default.
+func Open(ctx context.Context, dsn string, maxConns int) (*Store, error) {
 	cfg, err := pgxpool.ParseConfig(dsn)
 	if err != nil {
 		return nil, fmt.Errorf("store: parse dsn: %w", err)
 	}
-	// The notifier claims in parallel; a handful of connections is plenty for a
-	// single small VM and keeps Postgres memory modest.
-	cfg.MaxConns = 16
-	cfg.MinConns = 2
+	if maxConns <= 0 {
+		maxConns = 16
+	}
+	cfg.MaxConns = int32(maxConns)
+	cfg.MinConns = 1
 	cfg.MaxConnIdleTime = 5 * time.Minute
 
 	pool, err := pgxpool.NewWithConfig(ctx, cfg)

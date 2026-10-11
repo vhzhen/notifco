@@ -1,0 +1,64 @@
+# Overrides for Google Cloud's always-free e2-micro, which has only 1 GB of RAM.
+#
+# The base docker-compose.yml assumes a roomier box (Oracle's free ARM VM gives
+# 12 GB). On e2-micro the three containers plus the OS must fit in 1 GB, so
+# every limit here is deliberately small.
+#
+# Usage (both files, in this order):
+#   docker compose -f docker-compose.yml -f docker-compose.gcp.yml up -d
+#
+# Budget: postgres 256M + redis 80M + notifco 180M = 516M, leaving ~480M for
+# the kernel, dockerd and sshd. Add swap as well (see deploy/gcp/README.md) so
+# a transient spike degrades instead of triggering the OOM killer.
+
+services:
+  postgres:
+    command: >
+      postgres
+      -c shared_buffers=48MB
+      -c max_connections=30
+      -c work_mem=2MB
+      -c maintenance_work_mem=32MB
+      -c effective_cache_size=256MB
+      -c max_wal_size=512MB
+      -c min_wal_size=64MB
+      -c autovacuum_max_workers=1
+      -c max_parallel_workers=0
+      -c max_parallel_workers_per_gather=0
+      -c max_worker_processes=4
+    deploy:
+      resources:
+        limits:
+          memory: 256M
+
+  redis:
+    # Differ state is small: two short keys per watched section. 48 MB is
+    # generous. appendonly stays on so the epoch counters survive a restart.
+    command: >
+      redis-server
+      --appendonly yes
+      --appendfsync everysec
+      --maxmemory 48mb
+      --maxmemory-policy noeviction
+      --save ""
+    deploy:
+      resources:
+        limits:
+          memory: 80M
+
+  notifco:
+    environment:
+      # The default pool of 16 is too many backends for a 1 GB box.
+      NOTIFCO_DB_MAX_CONNS: "6"
+      # Fewer workers: e2-micro has a shared vCPU with a 0.25 baseline, so
+      # oversubscribing just adds context switching.
+      NOTIFCO_POLL_WORKERS: "2"
+      NOTIFCO_NOTIFY_WORKERS: "4"
+      # Keep Go's heap modest; GOMEMLIMIT makes the GC work harder rather than
+      # letting RSS drift up toward the container limit.
+      GOMEMLIMIT: "140MiB"
+      GOGC: "50"
+    deploy:
+      resources:
+        limits:
+          memory: 180M

@@ -297,6 +297,7 @@ Everything is environment variables; see [.env.sample](./.env.sample).
 | `NOTIFCO_SOURCE` | auto | `uwapi` or `mock`; inferred from the key |
 | `DATABASE_URL` | localhost | Postgres DSN |
 | `REDIS_URL` | localhost | Redis DSN |
+| `NOTIFCO_DB_MAX_CONNS` | `16` | Postgres pool size; lower to ~6 on a 1 GB VM |
 | `NOTIFCO_POLL_INTERVAL` | `60s` | base interval; bounds detection lag |
 | `NOTIFCO_HOT_INTERVAL` | `15s` | for courses with a full watched section |
 | `NOTIFCO_RATE_LIMIT` | `120` | req/min ceiling |
@@ -322,11 +323,19 @@ controls. Detection lag is *bounded* by the poll interval and reported separatel
 
 ## Deployment
 
-[deploy/oracle/README.md](./deploy/oracle/README.md) — full walkthrough for a $0 Oracle
-Cloud Always Free ARM VM, including the iptables gotcha, systemd unit, and backups.
+Two $0 paths, both fully documented:
 
-Cost comparison and the free-tier traps worth knowing (Render spins down; Neon's free
-Postgres runs out of compute hours for an always-on bot) are in that doc.
+- **[deploy/gcp/README.md](./deploy/gcp/README.md)** — Google Cloud always-free `e2-micro`.
+  Covers the three things that silently cost money (region, disk type, hour-based VM
+  allowance), the swap step that 1 GB of RAM requires, and a $1 budget alert.
+  Use `docker-compose.gcp.yml` alongside the base file.
+- **[deploy/oracle/README.md](./deploy/oracle/README.md)** — Oracle Cloud Always Free ARM
+  VM. Far more RAM (12 GB), but includes an iptables gotcha and Oracle reclaims idle
+  instances.
+
+Free-tier traps worth knowing either way: Render's free tier spins down when idle, which
+is fatal for a poller, and Neon's free Postgres allows 100 compute-hours a month with
+scale-to-zero — an always-on bot never idles and runs dry mid-month.
 
 ## How notifco differs from UWFlow
 

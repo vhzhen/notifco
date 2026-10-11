@@ -31,6 +31,9 @@ type Config struct {
 	// Storage
 	DatabaseURL string
 	RedisURL    string
+	// DBMaxConns caps the Postgres pool. Lower it on small hosts: each backend
+	// costs Postgres memory, and a 1 GB VM cannot afford many.
+	DBMaxConns int
 
 	// Poller
 	PollInterval time.Duration
@@ -103,6 +106,9 @@ func Load(role string) (*Config, error) {
 		return nil, err
 	}
 	if c.MaxAttempts, err = envInt("NOTIFCO_MAX_ATTEMPTS", 6); err != nil {
+		return nil, err
+	}
+	if c.DBMaxConns, err = envInt("NOTIFCO_DB_MAX_CONNS", 16); err != nil {
 		return nil, err
 	}
 
