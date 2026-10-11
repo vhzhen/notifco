@@ -45,8 +45,10 @@ func (s Snapshot) IsFull() bool { return s.Enrolled >= s.Capacity }
 // use each snapshot's own capacity, which is what makes a capacity increase on
 // a full section fire correctly.
 func IsOpening(prev, cur Snapshot) bool {
-	// A section with no capacity is not a real section; never fire on it.
-	if cur.Capacity <= 0 {
+	// Neither snapshot may be a non-section. A 0/0 previous state would
+	// otherwise satisfy "enrolled >= capacity" and fire spuriously the moment
+	// a real capacity appeared.
+	if cur.Capacity <= 0 || prev.Capacity <= 0 {
 		return false
 	}
 	wasFull := prev.Enrolled >= prev.Capacity
@@ -62,9 +64,19 @@ type Transition struct {
 	// Epoch is a monotonically increasing per-section counter, incremented
 	// atomically when the transition fires.
 	Epoch int64
-	// ID is the stable, restart-safe identity of this event:
-	// "{term}:{classNumber}:{epoch}". Paired with a UNIQUE constraint in
-	// Postgres, this is what makes notification delivery idempotent.
+	// ID is the stable, restart-safe identity of this event. Paired with a
+	// UNIQUE constraint in Postgres, it is what makes delivery idempotent.
+	//
+	// Format: "{term}:{class}:{epoch}:{unixMilli}".
+	//
+	// The timestamp is not decoration. The epoch alone comes from a Redis
+	// counter, and Redis is explicitly treated as a cache: if it is flushed or
+	// its key expires, INCR restarts at 1 and would regenerate an ID that
+	// Postgres has already seen. ON CONFLICT DO NOTHING would then silently
+	// discard a real seat opening. Including the detection time makes the ID
+	// collision-free across Redis state loss while still being fixed for the
+	// lifetime of one Transition value, so replaying the same transition
+	// remains a no-op.
 	ID string
 	// DetectedAt is when we observed the opening.
 	DetectedAt time.Time
@@ -86,6 +98,14 @@ redis.call('HSET', KEYS[1],
   'enrolled', ARGV[1], 'capacity', ARGV[2], 'observed_at', ARGV[3])
 redis.call('EXPIRE', KEYS[1], ARGV[4])
 
+-- Keep the epoch key's lifetime in lockstep with the state key. Refreshing it
+-- only when a transition fires would let the two diverge: a section that sits
+-- unchanged for longer than the TTL would lose its epoch while retaining its
+-- state, so the next INCR restarts at 1 and regenerates a spent transition id.
+if redis.call('EXISTS', KEYS[2]) == 1 then
+  redis.call('EXPIRE', KEYS[2], ARGV[4])
+end
+
 if not pe or not pc then
   -- Cold start: record state, never fire. Without this a fresh Redis would
   -- alert every watcher that an already-open section is open.
@@ -95,7 +115,13 @@ end
 local prevEnrolled, prevCapacity = tonumber(pe), tonumber(pc)
 local curEnrolled, curCapacity = tonumber(ARGV[1]), tonumber(ARGV[2])
 
-if curCapacity <= 0 then
+-- Guard against malformed stored state rather than erroring inside Lua.
+if not prevEnrolled or not prevCapacity then
+  return {0, 0, -1, -1}
+end
+
+-- A zero-capacity snapshot on either side is not a real section.
+if curCapacity <= 0 or prevCapacity <= 0 then
   return {0, 0, prevEnrolled, prevCapacity}
 end
 
@@ -169,12 +195,13 @@ func (d *Differ) Observe(ctx context.Context, s source.SectionState) (*Transitio
 	prevEnrolled, _ := toInt64(res[2])
 	prevCapacity, _ := toInt64(res[3])
 
+	detectedAt := time.Now().UTC()
 	return &Transition{
 		Section:    s,
 		Prev:       Snapshot{Enrolled: int(prevEnrolled), Capacity: int(prevCapacity)},
 		Epoch:      epoch,
-		ID:         TransitionID(s.Key(), epoch),
-		DetectedAt: time.Now().UTC(),
+		ID:         TransitionID(s.Key(), epoch, detectedAt),
+		DetectedAt: detectedAt,
 	}, nil
 }
 
@@ -229,8 +256,14 @@ func (d *Differ) Reset(ctx context.Context, k source.SectionKey) error {
 }
 
 // TransitionID builds the stable identity for a transition.
-func TransitionID(k source.SectionKey, epoch int64) string {
-	return fmt.Sprintf("%s:%d:%d", k.TermCode, k.ClassNumber, epoch)
+//
+// The epoch alone is not sufficient: it lives in Redis, which is a cache, so a
+// flush or an expired key restarts it at 1 and would regenerate an ID that
+// Postgres already recorded — causing a genuine seat opening to be silently
+// dropped by ON CONFLICT DO NOTHING. Mixing in the detection time removes that
+// collision while keeping the ID fixed for a given Transition value.
+func TransitionID(k source.SectionKey, epoch int64, detectedAt time.Time) string {
+	return fmt.Sprintf("%s:%d:%d:%d", k.TermCode, k.ClassNumber, epoch, detectedAt.UnixMilli())
 }
 
 // toInt64 normalises the several numeric shapes Redis can return.

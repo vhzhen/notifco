@@ -192,18 +192,28 @@ func (b *Bot) handleCommand(ctx context.Context, s *discordgo.Session, i *discor
 
 	var msg string
 	var err error
-	switch data.Name {
-	case "course":
-		msg, err = b.cmdCourseSearch(ctx, data)
-	case "watch":
-		msg, err = b.cmdWatch(ctx, i, data)
-	case "unwatch":
-		msg, err = b.cmdUnwatch(ctx, i, data)
-	case "watchlist":
-		msg, err = b.cmdWatchlist(ctx, i)
-	default:
-		msg = "Unknown command."
-	}
+	// discordgo dispatches each interaction on its own goroutine, so an
+	// unrecovered panic here would take the whole process down.
+	func() {
+		defer func() {
+			if r := recover(); r != nil {
+				b.log.Error("panic handling command", "command", data.Name, "panic", r)
+				err = fmt.Errorf("internal error")
+			}
+		}()
+		switch data.Name {
+		case "course":
+			msg, err = b.cmdCourseSearch(ctx, data)
+		case "watch":
+			msg, err = b.cmdWatch(ctx, i, data)
+		case "unwatch":
+			msg, err = b.cmdUnwatch(ctx, i, data)
+		case "watchlist":
+			msg, err = b.cmdWatchlist(ctx, i)
+		default:
+			msg = "Unknown command."
+		}
+	}()
 	if err != nil {
 		b.log.Error("command failed", "command", data.Name, "err", err)
 		msg = "Something went wrong: " + err.Error()
@@ -211,6 +221,7 @@ func (b *Bot) handleCommand(ctx context.Context, s *discordgo.Session, i *discor
 	if msg == "" {
 		msg = "No response."
 	}
+	msg = clampMessage(msg)
 
 	if _, err := s.InteractionResponseEdit(i.Interaction, &discordgo.WebhookEdit{
 		Content: &msg,
@@ -455,8 +466,14 @@ func (b *Bot) cmdWatchlist(ctx context.Context, i *discordgo.InteractionCreate) 
 	var sb strings.Builder
 	fmt.Fprintf(&sb, "**Your watchlist** (%d section(s))\n", len(items))
 	var newest time.Time
-	for _, it := range items {
+	// Cap the listing so a heavy watcher's reply still fits Discord's limit.
+	const maxListed = 40
+	for idx, it := range items {
 		s := it.Section
+		if idx == maxListed {
+			fmt.Fprintf(&sb, "- … and %d more\n", len(items)-maxListed)
+			break
+		}
 		state := "FULL"
 		if s.SeatsOpen() > 0 {
 			state = fmt.Sprintf("%d open", s.SeatsOpen())
@@ -519,6 +536,29 @@ func (b *Bot) handleAutocomplete(ctx context.Context, s *discordgo.Session, i *d
 	}); err != nil {
 		b.log.Debug("autocomplete respond failed", "err", err)
 	}
+}
+
+// discordMaxMessage is Discord's hard limit on message content length.
+// Exceeding it makes the API reject the whole message, so every reply this
+// package builds is clamped.
+const discordMaxMessage = 2000
+
+// clampMessage truncates to Discord's limit on a line boundary where possible.
+func clampMessage(s string) string {
+	if len(s) <= discordMaxMessage {
+		return s
+	}
+	const notice = "\n… truncated. Narrow the query or use `/watchlist` for your own watches."
+	cut := discordMaxMessage - len(notice)
+	if cut < 0 {
+		return s[:discordMaxMessage]
+	}
+	trimmed := s[:cut]
+	// Prefer cutting at the last newline so a line is not left half-rendered.
+	if idx := strings.LastIndexByte(trimmed, '\n'); idx > cut/2 {
+		trimmed = trimmed[:idx]
+	}
+	return trimmed + notice
 }
 
 func interactionUserID(i *discordgo.InteractionCreate) string {

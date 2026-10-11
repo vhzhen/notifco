@@ -13,6 +13,7 @@ package notifier
 import (
 	"context"
 	"errors"
+	"fmt"
 	"log/slog"
 	"math"
 	"math/rand"
@@ -28,6 +29,15 @@ const (
 	backoffBase = 2 * time.Second
 	backoffCap  = 10 * time.Minute
 	leaseTTL    = 2 * time.Minute
+
+	// reclaimEvery is how often expired leases are returned to the pending
+	// pool while running, not just at boot.
+	reclaimEvery = 30 * time.Second
+
+	// maxThrottles bounds how many times one notification may be requeued for
+	// rate limiting before it is given up on. Throttles do not consume delivery
+	// attempts, so without this cap the row would retry forever.
+	maxThrottles = 20
 )
 
 // Transport delivers one message. Implemented by the Discord layer, and by a
@@ -200,6 +210,12 @@ func (n *Notifier) Run(ctx context.Context) error {
 	tick := time.NewTicker(n.opts.PollEvery)
 	defer tick.Stop()
 
+	// Reclaiming only at boot is not enough: a worker killed mid-send leaves a
+	// row in 'sending', and Claim only ever selects 'pending', so that row
+	// would be stranded until the next process restart.
+	reclaim := time.NewTicker(reclaimEvery)
+	defer reclaim.Stop()
+
 	for {
 		// Drain everything currently claimable before sleeping again.
 		for {
@@ -226,6 +242,12 @@ func (n *Notifier) Run(ctx context.Context) error {
 		select {
 		case <-ctx.Done():
 			return nil
+		case <-reclaim.C:
+			if reclaimed, err := n.opts.Store.ReclaimStale(ctx); err != nil {
+				n.log.Warn("periodic reclaim failed", "err", err)
+			} else if reclaimed > 0 {
+				n.log.Info("reclaimed expired leases", "count", reclaimed)
+			}
 		case <-tick.C:
 		case <-n.wake:
 		}
@@ -315,9 +337,22 @@ func (n *Notifier) deliver(ctx context.Context, d store.Delivery) {
 		return
 	}
 
-	// Rate limited: retry without burning an attempt.
+	// Rate limited: retry without burning a delivery attempt, but bounded by
+	// maxThrottles so a persistently throttled row cannot loop forever.
 	var throttled *Throttled
 	if errors.As(err, &throttled) {
+		if d.Throttles >= maxThrottles {
+			if derr := n.opts.Store.DeadLetter(ctx, d.ID,
+				fmt.Sprintf("throttled %d times, giving up: %v", d.Throttles, err)); derr != nil {
+				n.log.Error("dead-letter failed", "id", d.ID, "err", derr)
+			}
+			if n.opts.Metrics != nil {
+				n.opts.Metrics.NotificationsTotal.WithLabelValues("dead_letter", "").Inc()
+			}
+			n.log.Warn("notification exhausted throttle budget",
+				"id", d.ID, "throttles", d.Throttles)
+			return
+		}
 		delay := throttled.RetryAfter
 		if delay <= 0 {
 			delay = backoffBase

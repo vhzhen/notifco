@@ -133,7 +133,7 @@ func renderAlert(d store.Delivery) string {
 	fmt.Fprintf(&sb, "- Detected <t:%d:R>\n", d.DetectedAt.Unix())
 	sb.WriteString("\nEnroll on Quest now — seats go fast.\n")
 	sb.WriteString(disclaimer)
-	return sb.String()
+	return clampMessage(sb.String())
 }
 
 // classify maps a Discord error to a notifier error type so the outbox knows

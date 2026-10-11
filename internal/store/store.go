@@ -7,6 +7,8 @@ import (
 	"errors"
 	"fmt"
 	"sort"
+	"strconv"
+	"strings"
 	"time"
 
 	"github.com/jackc/pgx/v5"
@@ -262,6 +264,10 @@ type CourseHit struct {
 // SearchCourses matches on course code prefix first, then title.
 func (s *Store) SearchCourses(ctx context.Context, term, query string, limit int) ([]CourseHit, error) {
 	norm := source.NormalizeCourseCode(query)
+	// NormalizeCourseCode already strips everything but [a-z0-9], so norm is
+	// safe in a LIKE prefix. Two guards matter:
+	//   * an empty norm must NOT become `LIKE '%'`, which matches everything;
+	//   * the raw query is escaped, so a user typing "%" does not wildcard.
 	const q = `
 SELECT course_code,
        MAX(course_title) AS course_title,
@@ -269,11 +275,14 @@ SELECT course_code,
        COUNT(*) FILTER (WHERE enrolled < capacity) AS open_sections
 FROM sections
 WHERE term_code = $1
-  AND (course_code LIKE $2 || '%' OR course_title ILIKE '%' || $3 || '%')
+  AND (
+        ($2 <> '' AND course_code LIKE $2 || '%')
+     OR ($3 <> '' AND course_title ILIKE '%' || $3 || '%')
+      )
 GROUP BY course_code
 ORDER BY (course_code = $2) DESC, course_code
 LIMIT $4`
-	rows, err := s.pool.Query(ctx, q, term, norm, query, limit)
+	rows, err := s.pool.Query(ctx, q, term, norm, escapeLike(query), limit)
 	if err != nil {
 		return nil, fmt.Errorf("store: search courses: %w", err)
 	}
@@ -289,6 +298,20 @@ LIMIT $4`
 	return out, rows.Err()
 }
 
+// escapeLike neutralises LIKE/ILIKE wildcards in user input.
+func escapeLike(s string) string {
+	var b strings.Builder
+	b.Grow(len(s))
+	for _, r := range s {
+		switch r {
+		case '%', '_', '\\':
+			b.WriteByte('\\')
+		}
+		b.WriteRune(r)
+	}
+	return b.String()
+}
+
 // FindSection resolves a (term, course, section) triple to a stored section.
 func (s *Store) FindSection(ctx context.Context, term, courseCode, sectionInput string) (*Section, error) {
 	sections, err := s.SectionsByCourse(ctx, term, courseCode)
@@ -299,15 +322,38 @@ func (s *Store) FindSection(ctx context.Context, term, courseCode, sectionInput 
 		return nil, ErrNotFound
 	}
 	for _, sec := range sections {
-		// Parse the trailing number out of "LEC 001" for matching.
-		var num int
-		_, _ = fmt.Sscanf(sec.SectionName[len(sec.SectionName)-3:], "%d", &num)
-		if source.MatchSection(sectionInput, sec.SectionName, num) {
+		if source.MatchSection(sectionInput, sec.SectionName, trailingNumber(sec.SectionName)) {
 			out := sec
 			return &out, nil
 		}
 	}
 	return nil, ErrNotFound
+}
+
+// trailingNumber extracts the numeric suffix of a section name such as
+// "LEC 001" -> 1. Returns 0 when there is none.
+//
+// This is deliberately written without slicing a fixed offset: a stored
+// section_name is not guaranteed to be at least three characters, and an
+// unguarded slice here was reachable from user slash-command input.
+func trailingNumber(sectionName string) int {
+	end := len(sectionName)
+	start := end
+	for start > 0 {
+		c := sectionName[start-1]
+		if c < '0' || c > '9' {
+			break
+		}
+		start--
+	}
+	if start == end {
+		return 0
+	}
+	n, err := strconv.Atoi(sectionName[start:end])
+	if err != nil {
+		return 0
+	}
+	return n
 }
 
 // ErrNotFound is returned when a lookup matches nothing.

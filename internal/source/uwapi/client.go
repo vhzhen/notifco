@@ -147,6 +147,24 @@ func (c *Client) get(ctx context.Context, endpoint string, dst any) error {
 	return lastErr
 }
 
+// StatusError carries an upstream HTTP status so callers can branch on it
+// without matching substrings of an error message.
+type StatusError struct {
+	Endpoint string
+	Status   int
+	Body     string
+}
+
+func (e *StatusError) Error() string {
+	return fmt.Sprintf("uwapi: %s: status %d: %s", e.Endpoint, e.Status, e.Body)
+}
+
+// IsNotFound reports whether err is an upstream 404.
+func IsNotFound(err error) bool {
+	var se *StatusError
+	return errors.As(err, &se) && se.Status == http.StatusNotFound
+}
+
 // do performs one attempt. It returns the HTTP status (0 on transport error)
 // and any Retry-After hint.
 func (c *Client) do(ctx context.Context, url, endpoint string, dst any) (int, time.Duration, error) {
@@ -165,6 +183,8 @@ func (c *Client) do(ctx context.Context, url, endpoint string, dst any) (int, ti
 		if c.obs != nil {
 			c.obs.ObserveRequest(endpoint, 0, time.Since(start))
 		}
+		// The URL is included by http.Client errors but never the key, which
+		// is header-only and never logged.
 		return 0, 0, fmt.Errorf("uwapi: %s: %w", endpoint, err)
 	}
 	defer res.Body.Close()
@@ -177,8 +197,11 @@ func (c *Client) do(ctx context.Context, url, endpoint string, dst any) (int, ti
 		// Drain a bounded amount for the error message; never log the key.
 		snippet, _ := io.ReadAll(io.LimitReader(res.Body, 256))
 		return res.StatusCode, parseRetryAfter(res.Header.Get("Retry-After")),
-			fmt.Errorf("uwapi: %s: status %d: %s", endpoint, res.StatusCode,
-				strings.TrimSpace(string(snippet)))
+			&StatusError{
+				Endpoint: endpoint,
+				Status:   res.StatusCode,
+				Body:     strings.TrimSpace(string(snippet)),
+			}
 	}
 
 	if err := json.NewDecoder(res.Body).Decode(dst); err != nil {
@@ -322,7 +345,7 @@ func (c *Client) CourseSections(
 	if err != nil {
 		// A course with no sections this term 404s. That is a normal empty
 		// result, not a failure; UWFlow swallows these too.
-		if strings.Contains(err.Error(), "status 404") {
+		if IsNotFound(err) {
 			return nil, nil
 		}
 		return nil, err

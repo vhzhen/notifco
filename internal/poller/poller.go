@@ -206,15 +206,19 @@ func (p *Poller) RunOnce(ctx context.Context) error {
 		return err
 	}
 	p.mu.Lock()
-	jobs := make([]*job, 0, len(p.known))
+	type todo struct {
+		j    *job
+		tier Tier
+	}
+	work := make([]todo, 0, len(p.known))
 	for _, j := range p.known {
-		jobs = append(jobs, j)
+		work = append(work, todo{j: j, tier: j.tier})
 	}
 	p.mu.Unlock()
 
-	for _, j := range jobs {
-		if err := p.pollCourse(ctx, j); err != nil {
-			p.log.Warn("poll failed", "course", j.courseCode, "err", err)
+	for _, w := range work {
+		if err := p.pollCourse(ctx, w.j, w.tier); err != nil {
+			p.log.Warn("poll failed", "course", w.j.courseCode, "err", err)
 		}
 	}
 	return nil
@@ -319,8 +323,13 @@ func (p *Poller) worker(ctx context.Context, jobs <-chan *job) {
 		if ctx.Err() != nil {
 			return
 		}
-		if err := p.pollCourse(ctx, j); err != nil {
-			p.log.Warn("poll failed", "course", j.courseCode, "tier", j.tier, "err", err)
+		// tier is mutated by refresh under p.mu; snapshot it once.
+		p.mu.Lock()
+		tier := j.tier
+		p.mu.Unlock()
+
+		if err := p.pollCourse(ctx, j, tier); err != nil {
+			p.log.Warn("poll failed", "course", j.courseCode, "tier", tier, "err", err)
 		}
 		p.reschedule(j)
 	}
@@ -328,17 +337,21 @@ func (p *Poller) worker(ctx context.Context, jobs <-chan *job) {
 
 // pollCourse fetches one course's sections, records them, and fans out any
 // transitions.
-func (p *Poller) pollCourse(ctx context.Context, j *job) error {
+//
+// noChange is owned by whichever worker currently holds the job. A job is only
+// ever dispatched to one worker at a time (dispatchDue pops it off the heap,
+// reschedule pushes it back), so it needs no lock.
+func (p *Poller) pollCourse(ctx context.Context, j *job, tier Tier) error {
 	start := time.Now()
 	states, err := p.opts.Source.CourseSections(ctx, j.term, j.subject, j.catalog)
 	if p.opts.Metrics != nil {
 		p.opts.Metrics.PollCycle.Observe(time.Since(start).Seconds())
 	}
 	if err != nil {
-		p.mark(j.tier, "error")
+		p.mark(tier, "error")
 		return err
 	}
-	p.mark(j.tier, "ok")
+	p.mark(tier, "ok")
 
 	if len(states) == 0 {
 		j.noChange++
@@ -389,29 +402,33 @@ func (p *Poller) mark(tier Tier, result string) {
 // Adaptive interval: widen exponentially while nothing changes, snap back to
 // base the moment something does, and clamp hot courses to the tight interval.
 // Jitter prevents all courses realigning into a synchronised burst.
+//
+// tier and watchers are mutated by refresh under p.mu, so they are read inside
+// the lock here rather than before taking it.
 func (p *Poller) reschedule(j *job) {
-	next := p.nextInterval(j)
-	j.dueAt = time.Now().Add(next)
-
 	p.mu.Lock()
 	defer p.mu.Unlock()
+
 	// Only requeue if the job is still watched.
 	if _, ok := p.known[string(j.term)+":"+j.courseCode]; !ok {
 		return
 	}
+	j.dueAt = time.Now().Add(p.intervalLocked(j.tier, j.noChange))
 	heap.Push(&p.queue, j)
 }
 
-func (p *Poller) nextInterval(j *job) time.Duration {
+// intervalLocked computes the next interval. Callers must hold p.mu, or pass
+// values not shared with refresh.
+func (p *Poller) intervalLocked(tier Tier, noChange int) time.Duration {
 	base := p.opts.BaseInterval
 	// Widen on quiet courses, capped at 5 doublings.
-	exp := j.noChange
+	exp := noChange
 	if exp > 5 {
 		exp = 5
 	}
 	d := time.Duration(float64(base) * math.Pow(2, float64(exp)))
 
-	if j.tier == TierHot && d > p.opts.HotInterval {
+	if tier == TierHot && d > p.opts.HotInterval {
 		d = p.opts.HotInterval
 	}
 	if d > p.opts.MaxInterval {
@@ -428,7 +445,9 @@ func (p *Poller) nextInterval(j *job) time.Duration {
 
 // NextInterval exposes interval computation for tests.
 func (p *Poller) NextInterval(tier Tier, noChange int) time.Duration {
-	return p.nextInterval(&job{tier: tier, noChange: noChange})
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	return p.intervalLocked(tier, noChange)
 }
 
 // SeedCatalog populates the sections table for a term so /course search and

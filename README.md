@@ -49,7 +49,7 @@ Full analysis of UWFlow is in [NOTES.md](./NOTES.md); the design is in
    │  compares old-vs-OLD capacity           │ epoch:{term}:{class} → counter│    │
    │  Lua CAS: set state + INCR epoch,       └───────────────────────────────┘    │
    │  atomically ⇒ concurrent pollers fire exactly once                            │
-   │  transition_id = "{term}:{class}:{epoch}"   ← restart-stable                  │
+   │  transition_id = "{term}:{class}:{epoch}:{unixMilli}"  ← collision-safe       │
    └──────────────────────────────┬────────────────────────────────────────────────┘
                                   │
    ┌──────────────────────────────▼────────────────────────────────────────────────┐
@@ -111,11 +111,11 @@ Reproduce with `make load-test`.
 
 | Stage | Time |
 |---|---|
-| Detect transition (Redis Lua CAS) | **106 µs** |
-| Fan out to 10,000 outbox rows (one `INSERT..SELECT`) | **58 ms** |
-| Drain all 10,000 (16 workers, instant transport) | **577 ms** |
-| Throughput | **17,324 msg/sec** |
-| Latency p50 / p95 / p99 / max | **356 ms / 612 ms / 632 ms / 635 ms** |
+| Detect transition (Redis Lua CAS) | **114 µs** |
+| Fan out to 10,000 outbox rows (one `INSERT..SELECT`) | **90 ms** |
+| Drain all 10,000 (16 workers, instant transport) | **616 ms** |
+| Throughput | **16,231 msg/sec** |
+| Latency p50 / p95 / p99 / max | **395 ms / 681 ms / 702 ms / 707 ms** |
 | **Duplicates** | **0** |
 | **Lost** | **0** |
 
@@ -156,16 +156,16 @@ $ go vet ./...           (clean)
 $ go mod verify          all modules verified
 $ go build ./...         OK
 $ go test -race ./...
-ok  internal/config          1.190s
-ok  internal/differ          1.394s
-ok  internal/notifier        1.239s
-ok  internal/poller          1.425s
-ok  internal/source          1.686s
-ok  internal/source/mock     1.577s
-ok  test/integration         2.238s
+ok  internal/config          1.550s
+ok  internal/differ          1.416s
+ok  internal/notifier        1.745s
+ok  internal/poller          2.319s
+ok  internal/source          1.221s
+ok  internal/source/mock     2.122s
+ok  test/integration         2.776s
 ```
 
-56 tests, all passing under `-race`. ~4,200 lines of Go plus ~2,300 of tests.
+65 tests, all passing under `-race`.
 
 Live end-to-end against the real API:
 
@@ -181,6 +181,36 @@ level=INFO msg="one-shot poll complete" delivered=0
  cs341       | TST 201      | 268/300 | f
  ... (7 sections from ONE request)
 ```
+
+### Audit
+
+The first working version was put through an independent audit that was told not
+to trust this README. It found eight real defects, each reproduced against live
+Postgres and Redis. All are fixed, and each has a regression test in
+[test/integration/regression_test.go](./test/integration/regression_test.go) that
+fails without the fix. The notable ones:
+
+| Severity | Defect | Fix |
+|---|---|---|
+| **Critical** | `transition_id` was `{term}:{class}:{epoch}` with the epoch from a Redis `INCR`. A Redis flush — which docker-compose explicitly permitted — restarted the epoch at 1, regenerating an ID Postgres had already recorded, so `ON CONFLICT DO NOTHING` **silently discarded a real seat opening**. | ID now embeds the detection time, making it collision-free across state loss; Redis also persists now. |
+| **Critical** | The epoch key's TTL was refreshed only when a transition fired, while the state key refreshed every observation. The two diverged, so a long-quiet section lost its epoch but kept its state — triggering the same collision with no outage at all. | Both TTLs refresh in lockstep inside the Lua script. |
+| **High** | `Claim` did `attempts+1` and `RetryWithoutAttempt` did `attempts-1`, netting zero, so a throttled notification retried **forever** and the `MaxAttempts` check was unreachable. | Separate `throttles` counter, capped. |
+| **High** | `ReclaimStale` ran only at boot and `Claim` only selects `pending`, so a worker killed mid-send stranded a row in `sending` **forever**. | Reclaim also runs every 30s while live. |
+| **High** | Data race on `job.tier` / `job.watchers` between the poller's refresh and its workers, proven with `-race`. | All reads moved under the mutex. |
+| Medium | A `0/0` previous snapshot satisfied "was full", so a section *appearing* fired a spurious alert. | Both snapshots must have positive capacity. |
+| Medium | Durations were passed to Postgres as Go strings (`"500µs"`), which `::interval` rejects. | `make_interval(secs => ...)`. |
+| Medium | No guard against Discord's 2,000-character limit, so `/watchlist` broke permanently for heavy users. | Output clamped and capped. |
+| Low | `FindSection` sliced the last three bytes of a section name unguarded — a panic reachable from slash input, and discordgo has no recover. | Numeric suffix parsed safely; panic recovery added to the command handler. |
+| Low | A bare `%` in search matched every course. | LIKE metacharacters escaped; empty prefix no longer matches all. |
+
+The auditor's verdict on the parts it tried hardest to break and could not:
+concurrent exactly-once firing holds (64 goroutines → one transition), cold-start
+suppression is correct, there is no SQL injection anywhere (every query uses
+placeholders), the API key cannot leak into logs or errors, `.env` is absent from
+all of git history, and the rate limiter and backoff are correct.
+
+Worth stating plainly: the test suite was green **before** the audit too. A green
+suite proves tests and failure modes don't intersect, not that the code is right.
 
 ## Setup
 

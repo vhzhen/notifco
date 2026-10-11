@@ -124,6 +124,8 @@ type fakeTransport struct {
 	dmsClosed map[string]bool
 	// permanent marks users that should dead-letter immediately.
 	permanent map[string]bool
+	// throttled maps a user to a number of consecutive rate-limit responses.
+	throttled map[string]int
 }
 
 func (f *fakeTransport) Deliver(_ context.Context, d store.Delivery) (string, error) {
@@ -132,6 +134,13 @@ func (f *fakeTransport) Deliver(_ context.Context, d store.Delivery) (string, er
 
 	if f.permanent[d.DiscordUserID] {
 		return "", &notifier.Permanent{Err: fmt.Errorf("unknown user %s", d.DiscordUserID)}
+	}
+	if n := f.throttled[d.DiscordUserID]; n > 0 {
+		f.throttled[d.DiscordUserID] = n - 1
+		return "", &notifier.Throttled{
+			Err:        fmt.Errorf("rate limited for %s", d.DiscordUserID),
+			RetryAfter: time.Millisecond,
+		}
 	}
 	if n := f.failures[d.DiscordUserID]; n > 0 {
 		f.failures[d.DiscordUserID] = n - 1
@@ -146,6 +155,15 @@ func (f *fakeTransport) Deliver(_ context.Context, d store.Delivery) (string, er
 	}
 	f.delivered = append(f.delivered, d)
 	return via, nil
+}
+
+func (f *fakeTransport) throttleUser(id string, times int) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	if f.throttled == nil {
+		f.throttled = map[string]int{}
+	}
+	f.throttled[id] = times
 }
 
 func (f *fakeTransport) count() int {
@@ -630,7 +648,13 @@ func TestIdempotentAcrossRestart(t *testing.T) {
 		}
 	}
 
-	transitionID := differ.TransitionID(source.SectionKey{TermCode: h.term, ClassNumber: 7010}, 1)
+	// The transition id now embeds the detection timestamp, so it cannot be
+	// reconstructed by hand. Read the one that was actually recorded.
+	var transitionID string
+	if err := h.store.Pool().QueryRow(ctx,
+		`SELECT transition_id FROM notifications LIMIT 1`).Scan(&transitionID); err != nil {
+		t.Fatal(err)
+	}
 	before, err := h.store.CountByTransition(ctx, transitionID)
 	if err != nil {
 		t.Fatal(err)

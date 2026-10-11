@@ -34,15 +34,23 @@ services:
   redis:
     image: redis:7-alpine
     restart: unless-stopped
-    # Differ state is a cache, not a system of record: losing it costs one poll
-    # cycle of detection and can never cause a duplicate notification. So
-    # persistence is deliberately minimal.
+    # Differ state is a cache: losing it costs one poll cycle of detection and
+    # cannot cause a duplicate notification, because dedup is enforced by a
+    # Postgres constraint.
+    #
+    # It is still persisted, though. The per-section epoch counter lives here,
+    # and wiping it restarts the counter — which, combined with a transition id
+    # that embeds the detection time, is safe, but keeping the counter means
+    # cold-start re-seeding (and therefore a blind poll cycle) is avoided
+    # across restarts. appendonly is cheap at this data volume.
     command: >
       redis-server
-      --save ""
-      --appendonly no
+      --appendonly yes
+      --appendfsync everysec
       --maxmemory 128mb
       --maxmemory-policy noeviction
+    volumes:
+      - redisdata:/data
     ports:
       - "127.0.0.1:6379:6379"
     healthcheck:
@@ -96,3 +104,4 @@ services:
 
 volumes:
   pgdata:
+  redisdata:

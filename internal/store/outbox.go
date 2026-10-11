@@ -42,9 +42,13 @@ type Delivery struct {
 	ID             int64
 	SubscriptionID int64
 	Attempts       int
-	TransitionID   string
-	SeatsOpen      int
-	DetectedAt     time.Time
+	// Throttles counts how many times this row has been requeued because of a
+	// Discord rate limit. Tracked separately from Attempts so throttling does
+	// not burn the delivery budget, while still being bounded.
+	Throttles    int
+	TransitionID string
+	SeatsOpen    int
+	DetectedAt   time.Time
 
 	DiscordUserID     string
 	DMChannelID       string
@@ -79,18 +83,20 @@ WITH claimed AS (
 UPDATE notifications n
 SET status = 'sending',
     attempts = n.attempts + 1,
-    lease_expires_at = NOW() + $2::interval
+    lease_expires_at = NOW() + make_interval(secs => $2::double precision)
 FROM claimed c
 WHERE n.id = c.id
-RETURNING n.id, n.subscription_id, n.attempts, n.transition_id, n.seats_open, n.detected_at`
+RETURNING n.id, n.subscription_id, n.attempts, n.throttles, n.transition_id,
+          n.seats_open, n.detected_at`
 
-	rows, err := s.pool.Query(ctx, q, limit, lease.String())
+	rows, err := s.pool.Query(ctx, q, limit, lease.Seconds())
 	if err != nil {
 		return nil, fmt.Errorf("store: claim: %w", err)
 	}
 	type claimRow struct {
 		id, subID  int64
 		attempts   int
+		throttles  int
 		transition string
 		seats      int
 		detected   time.Time
@@ -98,7 +104,8 @@ RETURNING n.id, n.subscription_id, n.attempts, n.transition_id, n.seats_open, n.
 	var claims []claimRow
 	for rows.Next() {
 		var c claimRow
-		if err := rows.Scan(&c.id, &c.subID, &c.attempts, &c.transition, &c.seats, &c.detected); err != nil {
+		if err := rows.Scan(&c.id, &c.subID, &c.attempts, &c.throttles,
+			&c.transition, &c.seats, &c.detected); err != nil {
 			rows.Close()
 			return nil, fmt.Errorf("store: claim scan: %w", err)
 		}
@@ -156,6 +163,7 @@ WHERE n.id = ANY($1)`
 		}
 		d.SubscriptionID = c.subID
 		d.Attempts = c.attempts
+		d.Throttles = c.throttles
 		d.TransitionID = c.transition
 		d.SeatsOpen = c.seats
 		d.DetectedAt = c.detected
@@ -187,10 +195,10 @@ RETURNING subscription_id`
 	// subscriptions retire themselves.
 	const cq = `
 UPDATE subscriptions
-SET cooldown_until = NOW() + $2::interval,
+SET cooldown_until = NOW() + make_interval(secs => $2::double precision),
     active = CASE WHEN notify_once THEN FALSE ELSE active END
 WHERE id = $1`
-	if _, err := tx.Exec(ctx, cq, subID, cooldown.String()); err != nil {
+	if _, err := tx.Exec(ctx, cq, subID, cooldown.Seconds()); err != nil {
 		return fmt.Errorf("store: mark sent cooldown %d: %w", id, err)
 	}
 	if err := tx.Commit(ctx); err != nil {
@@ -203,10 +211,11 @@ WHERE id = $1`
 func (s *Store) Retry(ctx context.Context, id int64, delay time.Duration, reason string) error {
 	const q = `
 UPDATE notifications
-SET status = 'pending', next_attempt_at = NOW() + $2::interval,
+SET status = 'pending',
+    next_attempt_at = NOW() + make_interval(secs => $2::double precision),
     lease_expires_at = NULL, last_error = $3
 WHERE id = $1`
-	if _, err := s.pool.Exec(ctx, q, id, delay.String(), truncate(reason, 500)); err != nil {
+	if _, err := s.pool.Exec(ctx, q, id, delay.Seconds(), truncate(reason, 500)); err != nil {
 		return fmt.Errorf("store: retry %d: %w", id, err)
 	}
 	return nil
@@ -224,15 +233,23 @@ WHERE id = $1`
 	return nil
 }
 
-// RetryWithoutAttempt reschedules without consuming an attempt. Used for
-// Discord 429s, which are our fault for sending too fast, not a bad recipient.
+// RetryWithoutAttempt reschedules without consuming a delivery attempt. Used
+// for Discord 429s, which reflect our send rate rather than a bad recipient.
+//
+// The decrement undoes Claim's increment, so a separate throttles counter is
+// incremented to keep the retry bounded. Without it the row would cycle
+// forever: Claim adds one, this subtracts one, and the MaxAttempts check could
+// never trip.
 func (s *Store) RetryWithoutAttempt(ctx context.Context, id int64, delay time.Duration, reason string) error {
 	const q = `
 UPDATE notifications
-SET status = 'pending', next_attempt_at = NOW() + $2::interval,
-    attempts = GREATEST(attempts - 1, 0), lease_expires_at = NULL, last_error = $3
+SET status = 'pending',
+    next_attempt_at = NOW() + make_interval(secs => $2::double precision),
+    attempts = GREATEST(attempts - 1, 0),
+    throttles = throttles + 1,
+    lease_expires_at = NULL, last_error = $3
 WHERE id = $1`
-	if _, err := s.pool.Exec(ctx, q, id, delay.String(), truncate(reason, 500)); err != nil {
+	if _, err := s.pool.Exec(ctx, q, id, delay.Seconds(), truncate(reason, 500)); err != nil {
 		return fmt.Errorf("store: retry without attempt %d: %w", id, err)
 	}
 	return nil

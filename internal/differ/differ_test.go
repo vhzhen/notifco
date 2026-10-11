@@ -3,6 +3,7 @@ package differ
 import (
 	"context"
 	"os"
+	"strings"
 	"sync"
 	"testing"
 	"time"
@@ -232,8 +233,10 @@ func TestObserveFiresOnceOnFullToOpen(t *testing.T) {
 	if tr.Epoch != 1 {
 		t.Errorf("epoch = %d, want 1", tr.Epoch)
 	}
-	if want := "1269:9002:1"; tr.ID != want {
-		t.Errorf("ID = %q, want %q", tr.ID, want)
+	// The id embeds the detection time, so assert the stable prefix rather
+	// than the whole string.
+	if want := "1269:9002:1:"; !strings.HasPrefix(tr.ID, want) {
+		t.Errorf("ID = %q, want prefix %q", tr.ID, want)
 	}
 	if tr.Prev != (Snapshot{Enrolled: 100, Capacity: 100}) {
 		t.Errorf("Prev = %+v, want 100/100", tr.Prev)
@@ -268,13 +271,43 @@ func TestObserveEpochIncrementsPerTransition(t *testing.T) {
 			t.Fatalf("cycle %d: expected transition", i)
 		}
 		ids = append(ids, tr.ID)
+		if int(tr.Epoch) != i+1 {
+			t.Errorf("cycle %d: epoch = %d, want %d", i, tr.Epoch, i+1)
+		}
 	}
 
-	want := []string{"1269:9003:1", "1269:9003:2", "1269:9003:3"}
-	for i := range want {
-		if ids[i] != want[i] {
-			t.Errorf("transition %d = %q, want %q", i, ids[i], want[i])
+	for i, want := range []string{"1269:9003:1:", "1269:9003:2:", "1269:9003:3:"} {
+		if !strings.HasPrefix(ids[i], want) {
+			t.Errorf("transition %d = %q, want prefix %q", i, ids[i], want)
 		}
+	}
+	// All ids must be distinct, or Postgres dedup would swallow real events.
+	seen := map[string]bool{}
+	for _, id := range ids {
+		if seen[id] {
+			t.Errorf("duplicate transition id %q", id)
+		}
+		seen[id] = true
+	}
+}
+
+// TestTransitionIDDiffersAfterEpochReset is the unit-level guard for the
+// collision that an audit found: the epoch lives in Redis, so a flush restarts
+// it at 1. If the id were epoch-only, the regenerated id would collide with a
+// spent one and Postgres would silently drop a real seat opening.
+func TestTransitionIDDiffersAfterEpochReset(t *testing.T) {
+	key := source.SectionKey{TermCode: "1269", ClassNumber: 4242}
+
+	first := TransitionID(key, 1, time.UnixMilli(1_700_000_000_000))
+	// Same epoch, later detection: must not collide.
+	second := TransitionID(key, 1, time.UnixMilli(1_700_000_060_000))
+
+	if first == second {
+		t.Fatalf("epoch reset regenerated an identical transition id (%q); "+
+			"the id must include something that survives Redis state loss", first)
+	}
+	if !strings.HasPrefix(first, "1269:4242:1:") {
+		t.Errorf("unexpected id shape: %q", first)
 	}
 }
 
