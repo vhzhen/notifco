@@ -72,6 +72,11 @@ jobs:
         run: go vet ./...
 
       - name: staticcheck
+        # Advisory, not blocking. staticcheck trails new Go releases: it cannot
+        # read export data from a toolchain newer than it supports and fails
+        # with "export data version 5 is greater than maximum supported
+        # version 4". go vet above is the blocking lint.
+        continue-on-error: true
         uses: dominikh/staticcheck-action@v1
         with:
           version: latest

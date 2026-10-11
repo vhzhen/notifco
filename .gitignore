@@ -1,7 +1,10 @@
 # Binaries
 /bin/
 /dist/
-notifco
+# Anchored to the repo root on purpose. An unanchored `notifco` also matches the
+# cmd/notifco PACKAGE DIRECTORY, which silently excluded the entrypoint from
+# every commit and left the published repo unable to build.
+/notifco
 *.exe
 *.dll
 *.so
