@@ -1,0 +1,32 @@
+# Binaries
+/bin/
+/dist/
+notifco
+*.exe
+*.dll
+*.so
+*.dylib
+
+# Test & coverage
+*.test
+*.out
+coverage.*
+/test/load/results/
+
+# Environment & secrets — never commit UW_API_KEY or DISCORD_TOKEN
+.env
+.env.*
+!.env.sample
+*.pem
+*.key
+
+# Go workspace
+go.work
+go.work.sum
+/vendor/
+
+# Editors / OS
+.DS_Store
+.idea/
+.vscode/
+*.swp
