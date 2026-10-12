@@ -24,9 +24,15 @@ const (
 	colorNeutral = 0x5865F2 // blurple: lists and confirmations
 	colorWarn    = 0xFEE75C // yellow: nothing found
 
-	// pageSize is sections per page. Eight keeps an embed comfortably under
-	// Discord's 4096-character description limit even with long names.
-	pageSize = 8
+	// pageSize is the MOST sections shown on one page. A page may hold fewer:
+	// see descBudget.
+	pageSize = 20
+	// descBudget is how many characters of rows (plus their group headings) fit
+	// on one page. Discord rejects a description over 4096 characters, and the
+	// summary line and hint around the rows take a few hundred, so rows get
+	// the rest. Without this, a watchlist of 20 different courses with long
+	// titles overflowed and the overflow was silently cut off, dropping rows.
+	descBudget = 3400
 	// barWidth is the number of cells in the fill bar.
 	barWidth = 8
 
@@ -211,15 +217,6 @@ type pageRow struct {
 	text  string
 }
 
-// pageCount returns how many pages n items need. Always at least 1, so an empty
-// list still renders a page.
-func pageCount(n, size int) int {
-	if n <= 0 || size <= 0 {
-		return 1
-	}
-	return (n + size - 1) / size
-}
-
 // clampPage forces page into [0, pages-1]. Page numbers arrive inside button
 // IDs, so they are untrusted and may be stale or hand-edited.
 func clampPage(page, pages int) int {
@@ -232,24 +229,63 @@ func clampPage(page, pages int) int {
 	return page
 }
 
+// groupCost is the characters a group heading adds: the text plus bold markers
+// and newlines.
+func groupCost(group string) int {
+	if group == "" {
+		return 0
+	}
+	return utf8.RuneCountInString(group) + 6
+}
+
+// paginateRows splits rows into pages holding at most size rows AND at most
+// descBudget characters. The split depends only on the rows, so it can be
+// recomputed identically on every button click with no stored state.
+//
+// A group heading is charged to the first row of each page as well as to every
+// group change, since a page that starts mid-group still prints its heading.
+func paginateRows(rows []pageRow, size int) [][]pageRow {
+	if len(rows) == 0 {
+		return [][]pageRow{nil}
+	}
+	var (
+		pages [][]pageRow
+		cur   []pageRow
+		used  int
+		prev  string
+	)
+	for _, r := range rows {
+		cost := utf8.RuneCountInString(r.text) + 1
+		if len(cur) == 0 || r.group != prev {
+			cost += groupCost(r.group)
+		}
+		// Always put at least one row on a page so an oversized row cannot
+		// loop forever or produce an empty page.
+		if len(cur) > 0 && (len(cur) >= size || used+cost > descBudget) {
+			pages = append(pages, cur)
+			cur, used, prev = nil, 0, ""
+			cost = utf8.RuneCountInString(r.text) + 1 + groupCost(r.group)
+		}
+		cur = append(cur, r)
+		used += cost
+		prev = r.group
+	}
+	return append(pages, cur)
+}
+
 // renderPage returns the description for one page of rows, the page actually
 // shown (after clamping), and the total page count.
 //
 // A group heading is emitted whenever the group changes, and always at the top
 // of a page, so a page that starts mid-group still says what it belongs to.
 func renderPage(rows []pageRow, page, size int) (desc string, cur, pages int) {
-	pages = pageCount(len(rows), size)
+	all := paginateRows(rows, size)
+	pages = len(all)
 	cur = clampPage(page, pages)
-
-	start := cur * size
-	end := start + size
-	if end > len(rows) {
-		end = len(rows)
-	}
 
 	var sb strings.Builder
 	prev := "\x00" // sentinel: no group yet
-	for _, r := range rows[start:end] {
+	for _, r := range all[cur] {
 		if r.group != prev && r.group != "" {
 			if sb.Len() > 0 {
 				sb.WriteString("\n")
@@ -352,7 +388,6 @@ func searchView(code, termName string, sections []store.Section, page int) view 
 	var desc strings.Builder
 	fmt.Fprintf(&desc, "**%s** · %d open · %d full\n\n", plural(len(sections), "section"), open, full)
 	desc.WriteString(body)
-	fmt.Fprintf(&desc, "\n\n*Watch one: `/watch %s %s`*", courseLabel(code), exampleSection(sections))
 
 	color := colorFull
 	if open > 0 {
@@ -368,20 +403,6 @@ func searchView(code, termName string, sections []store.Section, page int) view 
 		e.Timestamp = newest.UTC().Format(time.RFC3339)
 	}
 	return view{embed: e, components: pagerComponents("s", source.NormalizeCourseCode(code), cur, pages)}
-}
-
-// exampleSection picks a sensible section for the /watch hint: a full one if
-// there is one, since that is what people actually want alerts on.
-func exampleSection(sections []store.Section) string {
-	for _, s := range sections {
-		if s.SeatsOpen() <= 0 {
-			return s.SectionName
-		}
-	}
-	if len(sections) > 0 {
-		return sections[0].SectionName
-	}
-	return "LEC 001"
 }
 
 // watchlistView renders a user's subscriptions grouped by course, paginated.

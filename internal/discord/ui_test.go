@@ -178,15 +178,7 @@ func TestSectionRowStates(t *testing.T) {
 
 // --- pagination --------------------------------------------------------------
 
-func TestPageCountAndClamp(t *testing.T) {
-	tests := []struct{ n, size, want int }{
-		{0, 8, 1}, {1, 8, 1}, {8, 8, 1}, {9, 8, 2}, {16, 8, 2}, {17, 8, 3}, {100, 8, 13},
-	}
-	for _, tc := range tests {
-		if got := pageCount(tc.n, tc.size); got != tc.want {
-			t.Errorf("pageCount(%d,%d) = %d, want %d", tc.n, tc.size, got, tc.want)
-		}
-	}
+func TestClampPage(t *testing.T) {
 	// Page numbers come from button IDs, so they may be stale or edited.
 	for _, tc := range []struct{ page, pages, want int }{
 		{-5, 3, 0}, {0, 3, 0}, {2, 3, 2}, {3, 3, 2}, {999, 3, 2}, {0, 1, 0},
@@ -197,10 +189,30 @@ func TestPageCountAndClamp(t *testing.T) {
 	}
 }
 
+func TestPageSizeIsTwenty(t *testing.T) {
+	if pageSize != 20 {
+		t.Fatalf("pageSize = %d, want 20", pageSize)
+	}
+	count := func(n int) int {
+		rows := make([]pageRow, n)
+		for i := range rows {
+			rows[i] = pageRow{group: "Lectures", text: "row"}
+		}
+		return len(paginateRows(rows, pageSize))
+	}
+	for _, tc := range []struct{ n, want int }{
+		{0, 1}, {1, 1}, {20, 1}, {21, 2}, {40, 2}, {41, 3}, {100, 5},
+	} {
+		if got := count(tc.n); got != tc.want {
+			t.Errorf("%d rows -> %d pages, want %d", tc.n, got, tc.want)
+		}
+	}
+}
+
 // TestPaginationCoversEverySectionExactlyOnce: walking every page must show
 // each section once, with none dropped or repeated.
 func TestPaginationCoversEverySectionExactlyOnce(t *testing.T) {
-	const n = 21
+	const n = 45
 	sections := manySections(n)
 
 	seen := map[string]int{}
@@ -210,7 +222,7 @@ func TestPaginationCoversEverySectionExactlyOnce(t *testing.T) {
 		if v.embed == nil {
 			t.Fatal("nil embed")
 		}
-		total := pageCount(n, pageSize)
+		total := len(paginateRows(sectionRows(sections), pageSize))
 		pages = total
 		for _, s := range sections {
 			if strings.Contains(v.embed.Description, "`"+s.SectionName+"`") {
@@ -222,7 +234,7 @@ func TestPaginationCoversEverySectionExactlyOnce(t *testing.T) {
 		}
 	}
 	if pages != 3 {
-		t.Fatalf("21 sections at %d per page should be 3 pages, got %d", pageSize, pages)
+		t.Fatalf("%d sections at %d per page should be 3 pages, got %d", n, pageSize, pages)
 	}
 	if len(seen) != n {
 		t.Errorf("saw %d distinct sections across pages, want %d", len(seen), n)
@@ -350,14 +362,14 @@ func TestEmbedsRespectDiscordLimits(t *testing.T) {
 	}
 
 	var views []view
-	for p := 0; p < pageCount(len(sections), pageSize); p++ {
+	for p := 0; p < 6; p++ {
 		views = append(views, searchView("math135", "Fall 2026", sections, p))
 	}
 	var items []store.WatchItem
 	for _, s := range sections {
 		items = append(items, store.WatchItem{Section: s})
 	}
-	for p := 0; p < pageCount(len(items), pageSize); p++ {
+	for p := 0; p < 6; p++ {
 		views = append(views, watchlistView(items, map[string]string{"1269": "Fall 2026"}, p))
 	}
 	views = append(views, watchConfirmView("math135", long, "Fall 2026", sections, 60, 0))
@@ -421,9 +433,8 @@ func TestSearchViewTitleAndColour(t *testing.T) {
 	if !strings.Contains(v.embed.Description, "**2 sections** · 1 open · 1 full") {
 		t.Errorf("summary line wrong:\n%s", v.embed.Description)
 	}
-	// The watch hint should point at a FULL section, which is what people want.
-	if !strings.Contains(v.embed.Description, "/watch MATH 135 LEC 001") {
-		t.Errorf("hint should suggest the full section:\n%s", v.embed.Description)
+	if strings.Contains(v.embed.Description, "Watch one") || strings.Contains(v.embed.Description, "/watch") {
+		t.Errorf("the 'Watch one' tip was removed but is back:\n%s", v.embed.Description)
 	}
 	if v.embed.Timestamp == "" {
 		t.Error("expected an as-of timestamp")
@@ -556,5 +567,106 @@ func TestNoFooterOrStatusEmojiAnywhere(t *testing.T) {
 				t.Errorf("%s: still contains %q", name, banned)
 			}
 		}
+	}
+}
+
+// sectionRows mirrors how searchView turns sections into rows, for tests that
+// need to know the page count.
+func sectionRows(sections []store.Section) []pageRow {
+	sections = sortSections(sections)
+	rows := make([]pageRow, 0, len(sections))
+	for _, s := range sections {
+		rows = append(rows, pageRow{group: componentTitle(s.Component), text: sectionRow(s)})
+	}
+	return rows
+}
+
+// TestWatchlistNeverSilentlyDropsRows is the reason pages are also limited by
+// size and not just row count. Twenty rows is fine for a search, whose headings
+// are short ("Lectures"), but a watchlist heading is a whole course title, and
+// 20 different courses with long titles overflowed Discord's 4096-character
+// limit. The overflow used to be cut off silently, so rows vanished with no
+// sign anything was missing.
+func TestWatchlistNeverSilentlyDropsRows(t *testing.T) {
+	for _, titleLen := range []int{40, 120, 200, 300} {
+		var items []store.WatchItem
+		for i := 0; i < 45; i++ {
+			s := sec("LEC", "LEC 001", 99, 100)
+			s.CourseCode = fmt.Sprintf("cs%d", 100+i)
+			s.CourseTitle = strings.Repeat("x", titleLen)
+			items = append(items, store.WatchItem{Section: s})
+		}
+		names := map[string]string{"1269": "Fall 2026"}
+
+		seen := map[string]int{}
+		for p := 0; p < 60; p++ {
+			e := watchlistView(items, names, p).embed
+			if n := utf8.RuneCountInString(e.Description); n > maxEmbedDesc {
+				t.Fatalf("title=%d page %d: description %d runes > %d", titleLen, p, n, maxEmbedDesc)
+			}
+			// Whole-description truncation lands on exactly the limit. (An
+			// ellipsis alone is not evidence: a long course title is legitimately
+			// shortened with one inside its own heading.)
+			if utf8.RuneCountInString(e.Description) >= maxEmbedDesc {
+				t.Fatalf("title=%d page %d: description hit the %d limit, so rows were cut off",
+					titleLen, p, maxEmbedDesc)
+			}
+			for _, it := range items {
+				if strings.Contains(e.Description, "**"+courseHeader(it.Section.CourseCode, it.Section.CourseTitle, "Fall 2026")+"**") {
+					seen[it.Section.CourseCode]++
+				}
+			}
+			if len(watchlistView(items, names, p).components) > 0 {
+				row := watchlistView(items, names, p).components[0].(discordgo.ActionsRow)
+				if row.Components[2].(discordgo.Button).Disabled {
+					break // last page reached
+				}
+			}
+		}
+		if len(seen) != len(items) {
+			t.Errorf("title=%d: %d of %d courses visible across all pages", titleLen, len(seen), len(items))
+		}
+		for code, c := range seen {
+			if c != 1 {
+				t.Errorf("title=%d: %s shown on %d pages, want exactly 1", titleLen, code, c)
+			}
+		}
+	}
+}
+
+func TestPaginateRowsRespectsBothLimits(t *testing.T) {
+	// Many short rows: bounded by row count.
+	short := make([]pageRow, 50)
+	for i := range short {
+		short[i] = pageRow{group: "g", text: "r"}
+	}
+	for i, pg := range paginateRows(short, 20) {
+		if len(pg) > 20 {
+			t.Errorf("page %d has %d rows, max 20", i, len(pg))
+		}
+	}
+	// Few huge rows: bounded by character budget, never an empty page.
+	huge := make([]pageRow, 10)
+	for i := range huge {
+		huge[i] = pageRow{group: fmt.Sprintf("g%d", i), text: strings.Repeat("y", 900)}
+	}
+	pages := paginateRows(huge, 20)
+	if len(pages) < 2 {
+		t.Fatalf("10 rows of 900 chars fit on %d page(s); the character budget is not applied", len(pages))
+	}
+	total := 0
+	for i, pg := range pages {
+		if len(pg) == 0 {
+			t.Errorf("page %d is empty", i)
+		}
+		total += len(pg)
+	}
+	if total != len(huge) {
+		t.Errorf("pages hold %d rows, want %d (rows were lost or duplicated)", total, len(huge))
+	}
+	// A single row larger than the budget still gets a page instead of looping.
+	one := paginateRows([]pageRow{{group: "g", text: strings.Repeat("z", 5000)}}, 20)
+	if len(one) != 1 || len(one[0]) != 1 {
+		t.Errorf("oversized single row -> %d pages", len(one))
 	}
 }
