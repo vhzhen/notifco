@@ -2,6 +2,9 @@ package schedpage
 
 import (
 	"context"
+	"crypto/tls"
+	"crypto/x509"
+	_ "embed"
 	"errors"
 	"fmt"
 	"io"
@@ -62,6 +65,34 @@ var (
 	catalogRE = regexp.MustCompile(`^[0-9]{3}[A-Z]?$`)
 	termRE    = regexp.MustCompile(`^[0-9]{4}$`)
 )
+
+// globalSignIntermediate is the GlobalSign "GCC R46 OV TLS CA 2025" intermediate
+// certificate (public, expires 2029-06-23).
+//
+// classes.uwaterloo.ca issues its leaf from this CA but SENDS a different,
+// older intermediate, so the chain the server presents cannot be verified.
+// Browsers and macOS quietly fetch the missing certificate; Linux (the VM and
+// the Alpine container) does not, and every request failed certificate
+// verification. The server's chain is simply misconfigured.
+//
+// Fix: trust this one public intermediate, for THIS client only. Verification
+// stays on. It is added to the system roots, never replacing them, and the
+// client can only talk to the one UW host (redirects off it are refused). When
+// the certificate expires this fails closed: notes show as unavailable. The
+// proper fix is for UW to serve the right chain.
+//
+//go:embed certs/globalsign-gcc-r46-ov-tls-ca-2025.pem
+var globalSignIntermediate []byte
+
+// tlsConfig returns system roots plus the embedded intermediate.
+func tlsConfig() *tls.Config {
+	pool, err := x509.SystemCertPool()
+	if err != nil || pool == nil {
+		pool = x509.NewCertPool()
+	}
+	pool.AppendCertsFromPEM(globalSignIntermediate)
+	return &tls.Config{RootCAs: pool, MinVersion: tls.VersionTLS12}
+}
 
 // Options configures a Client. Zero values take the defaults.
 type Options struct {
@@ -129,7 +160,9 @@ func New(opts Options) *Client {
 
 	hc := opts.HTTPClient
 	if hc == nil {
-		hc = &http.Client{Timeout: requestTimeout}
+		tr := http.DefaultTransport.(*http.Transport).Clone()
+		tr.TLSClientConfig = tlsConfig()
+		hc = &http.Client{Timeout: requestTimeout, Transport: tr}
 	}
 	// Never follow a redirect off the original host: a redirect is the one way
 	// a request this client builds could end up somewhere it did not choose.
@@ -205,6 +238,13 @@ func (c *Client) fetch(key, term, subject, catalog string, cl *call) {
 	defer cancel()
 
 	notes, err := c.lookup(ctx, term, subject, catalog)
+	if err != nil {
+		// Warn, not debug: this was invisible once, and it hid a broken TLS
+		// chain. Failures are cached for FailTTL, so this is at most one line
+		// per course per few minutes.
+		c.log.Warn("schedule page lookup failed; reserve notes unavailable",
+			"term", term, "subject", subject, "catalog", catalog, "err", err)
+	}
 
 	ttl := c.ttl
 	if err != nil {
