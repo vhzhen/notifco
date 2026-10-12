@@ -388,6 +388,7 @@ func searchView(code, termName string, sections []store.Section, page int) view 
 	var desc strings.Builder
 	fmt.Fprintf(&desc, "**%s** · %d open · %d full\n\n", plural(len(sections), "section"), open, full)
 	desc.WriteString(body)
+	fmt.Fprintf(&desc, "\n\n*Watch one: `/watch %s %s`*", courseLabel(code), exampleSection(sections))
 
 	color := colorFull
 	if open > 0 {
@@ -403,6 +404,20 @@ func searchView(code, termName string, sections []store.Section, page int) view 
 		e.Timestamp = newest.UTC().Format(time.RFC3339)
 	}
 	return view{embed: e, components: pagerComponents("s", source.NormalizeCourseCode(code), cur, pages)}
+}
+
+// exampleSection picks a sensible section for the /watch hint: a full one if
+// there is one, since that is what people actually want alerts on.
+func exampleSection(sections []store.Section) string {
+	for _, s := range sections {
+		if s.SeatsOpen() <= 0 {
+			return s.SectionName
+		}
+	}
+	if len(sections) > 0 {
+		return sections[0].SectionName
+	}
+	return "LEC 001"
 }
 
 // watchlistView renders a user's subscriptions grouped by course, paginated.

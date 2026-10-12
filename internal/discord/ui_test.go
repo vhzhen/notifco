@@ -433,8 +433,9 @@ func TestSearchViewTitleAndColour(t *testing.T) {
 	if !strings.Contains(v.embed.Description, "**2 sections** · 1 open · 1 full") {
 		t.Errorf("summary line wrong:\n%s", v.embed.Description)
 	}
-	if strings.Contains(v.embed.Description, "Watch one") || strings.Contains(v.embed.Description, "/watch") {
-		t.Errorf("the 'Watch one' tip was removed but is back:\n%s", v.embed.Description)
+	// The watch hint should point at a FULL section, which is what people want.
+	if !strings.Contains(v.embed.Description, "*Watch one: `/watch MATH 135 LEC 001`*") {
+		t.Errorf("hint should suggest the full section:\n%s", v.embed.Description)
 	}
 	if v.embed.Timestamp == "" {
 		t.Error("expected an as-of timestamp")
@@ -668,5 +669,27 @@ func TestPaginateRowsRespectsBothLimits(t *testing.T) {
 	one := paginateRows([]pageRow{{group: "g", text: strings.Repeat("z", 5000)}}, 20)
 	if len(one) != 1 || len(one[0]) != 1 {
 		t.Errorf("oversized single row -> %d pages", len(one))
+	}
+}
+
+// TestWatchHintFallsBackWhenNothingIsFull: with every section open, the tip
+// still names a real section rather than a placeholder.
+func TestWatchHintFallsBackWhenNothingIsFull(t *testing.T) {
+	v := searchView("cs341", "Fall 2026", []store.Section{
+		sec("LEC", "LEC 002", 50, 100), sec("LEC", "LEC 001", 60, 100),
+	}, 0)
+	if !strings.Contains(v.embed.Description, "/watch CS 341 LEC 001") {
+		t.Errorf("expected a real section in the tip:\n%s", v.embed.Description)
+	}
+}
+
+// TestWatchHintOnEveryPage: the tip belongs to the whole result, so a user who
+// pages forward still sees it.
+func TestWatchHintOnEveryPage(t *testing.T) {
+	sections := manySections(45)
+	for p := 0; p < 3; p++ {
+		if d := searchView("math135", "Fall 2026", sections, p).embed.Description; !strings.Contains(d, "Watch one:") {
+			t.Errorf("page %d lost the tip", p)
+		}
 	}
 }
