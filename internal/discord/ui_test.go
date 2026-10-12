@@ -145,7 +145,7 @@ func TestFillBarOnlyFullWhenActuallyFull(t *testing.T) {
 
 func TestSectionRowStates(t *testing.T) {
 	open := sectionRow(sec("LEC", "LEC 002", 99, 100))
-	for _, want := range []string{"🟢", "`LEC 002`", "`99/100`", "1 seat open"} {
+	for _, want := range []string{"`LEC 002`", "`99/100`", "1 seat open"} {
 		if !strings.Contains(open, want) {
 			t.Errorf("open row missing %q: %s", want, open)
 		}
@@ -154,8 +154,16 @@ func TestSectionRowStates(t *testing.T) {
 		t.Errorf("bad pluralisation: %s", open)
 	}
 	full := sectionRow(sec("LEC", "LEC 001", 100, 100))
-	if !strings.Contains(full, "🔴") || !strings.Contains(full, "Full") {
+	if !strings.Contains(full, "Full") {
 		t.Errorf("full row wrong: %s", full)
+	}
+	// Status is carried by text and the fill bar, not coloured dots.
+	for _, row := range []string{open, full} {
+		for _, banned := range []string{"🟢", "🔴", "✅"} {
+			if strings.Contains(row, banned) {
+				t.Errorf("row contains %s, which was removed: %s", banned, row)
+			}
+		}
 	}
 	many := sectionRow(sec("LEC", "LEC 003", 80, 100))
 	if !strings.Contains(many, "20 seats open") {
@@ -267,8 +275,8 @@ func TestSinglePageHasNoButtons(t *testing.T) {
 	if v.components != nil {
 		t.Errorf("a 5-section course got %d component rows, want none", len(v.components))
 	}
-	if strings.Contains(v.embed.Footer.Text, "Page ") {
-		t.Errorf("single page footer mentions pages: %q", v.embed.Footer.Text)
+	if v.embed.Footer != nil {
+		t.Errorf("single page should have no footer, got %q", v.embed.Footer.Text)
 	}
 }
 
@@ -410,7 +418,7 @@ func TestSearchViewTitleAndColour(t *testing.T) {
 	if v.embed.Color != colorOpen {
 		t.Errorf("course with a seat = %#x, want green", v.embed.Color)
 	}
-	if !strings.Contains(v.embed.Description, "🟢 1 open · 🔴 1 full") {
+	if !strings.Contains(v.embed.Description, "**2 sections** · 1 open · 1 full") {
 		t.Errorf("summary line wrong:\n%s", v.embed.Description)
 	}
 	// The watch hint should point at a FULL section, which is what people want.
@@ -504,6 +512,48 @@ func TestNoButtonIDEverEscapesTheValidRange(t *testing.T) {
 				if !ok || target < 0 || target >= pages {
 					t.Errorf("pages=%d page=%d: id %q targets %d, outside [0,%d)", pages, page, id, target, pages)
 				}
+			}
+		}
+	}
+}
+
+// TestNoFooterOrStatusEmojiAnywhere guards the requested removals across every
+// view, including multi-page ones: no "best-effort" footer, no coloured status
+// dots, no checkmark.
+func TestNoFooterOrStatusEmojiAnywhere(t *testing.T) {
+	sections := manySections(21)
+	var items []store.WatchItem
+	for _, s := range sections {
+		items = append(items, store.WatchItem{Section: s})
+	}
+	cs := store.Delivery{
+		CourseCode: "math135", CourseTitle: "Algebra", SectionName: "LEC 002",
+		Capacity: 100, Enrolled: 99, SeatsOpen: 1, DetectedAt: time.Unix(1_790_000_000, 0),
+	}
+
+	views := map[string]*discordgo.MessageEmbed{
+		"alert": alertEmbed(cs, "Fall 2026"),
+		"watch": watchConfirmView("math135", "Algebra", "Fall 2026", sections, 3, 1).embed,
+		"matches": matchesView("alg", "Fall 2026", []store.CourseHit{
+			{CourseCode: "math135", CourseTitle: "Algebra", Sections: 3, OpenSections: 2},
+		}).embed,
+	}
+	for p := 0; p < 3; p++ {
+		views[fmt.Sprintf("search p%d", p)] = searchView("math135", "Fall 2026", sections, p).embed
+		views[fmt.Sprintf("watchlist p%d", p)] = watchlistView(items, map[string]string{"1269": "Fall 2026"}, p).embed
+	}
+
+	for name, e := range views {
+		if e.Footer != nil {
+			t.Errorf("%s: has a footer %q, which was removed", name, e.Footer.Text)
+		}
+		all := e.Title + "\n" + e.Description
+		for _, f := range e.Fields {
+			all += "\n" + f.Name + f.Value
+		}
+		for _, banned := range []string{"🟢", "🔴", "✅", "Best-effort", "best-effort", "snapshot"} {
+			if strings.Contains(all, banned) {
+				t.Errorf("%s: still contains %q", name, banned)
 			}
 		}
 	}

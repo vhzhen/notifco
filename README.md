@@ -22,11 +22,11 @@ Then, in any channel:
 Results are laid out like this, with **Previous / Next** buttons when a course has more sections than fit on one page (MATH 135 has 25):
 
 > **MATH 135 - Algebra for Honours Mathematics [Fall 2026]**
-> 25 sections · 🟢 23 open · 🔴 2 full
+> 25 sections · 23 open · 2 full
 >
 > **Lectures**
-> 🟢 `LEC 002` ▰▰▰▰▰▰▰▱ `109/120` · **11 seats open**
-> 🔴 `LEC 001` ▰▰▰▰▰▰▰▰ `120/120` · Full
+> `LEC 002` ▰▰▰▰▰▰▰▱ `109/120` · **11 seats open**
+> `LEC 001` ▰▰▰▰▰▰▰▰ `120/120` · Full
 
 Three things to know:
 

@@ -189,18 +189,17 @@ func seatsText(s store.Section) string {
 
 // sectionRow renders one section as a line, e.g.
 //
-//	🟢 `LEC 002` ▰▰▰▰▰▰▰▱ `99/100` · **1 seat open**
+//	`LEC 002` ▰▰▰▰▰▰▰▱ `99/100` · **1 seat open**
+//
+// Open versus full is carried by the text itself (bold "N seats open" against
+// plain "Full") and by the fill bar, rather than by a coloured dot.
 func sectionRow(s store.Section) string {
-	icon := "🔴"
-	if s.SeatsOpen() > 0 {
-		icon = "🟢"
-	}
 	online := ""
 	if s.IsOnline {
 		online = " · 🌐 online"
 	}
-	return fmt.Sprintf("%s `%s` %s `%d/%d` · %s%s",
-		icon, s.SectionName, fillBar(s.Enrolled, s.Capacity),
+	return fmt.Sprintf("`%s` %s `%d/%d` · %s%s",
+		s.SectionName, fillBar(s.Enrolled, s.Capacity),
 		s.Enrolled, s.Capacity, seatsText(s), online)
 }
 
@@ -325,8 +324,6 @@ func pagerComponents(kind, key string, page, pages int) []discordgo.MessageCompo
 
 // --- views ------------------------------------------------------------------
 
-const footerNote = "Best-effort snapshot — verify on Quest"
-
 // searchView renders one course with its sections, paginated.
 func searchView(code, termName string, sections []store.Section, page int) view {
 	sections = sortSections(sections)
@@ -353,7 +350,7 @@ func searchView(code, termName string, sections []store.Section, page int) view 
 	body, cur, pages := renderPage(rows, page, pageSize)
 
 	var desc strings.Builder
-	fmt.Fprintf(&desc, "**%s** · 🟢 %d open · 🔴 %d full\n\n", plural(len(sections), "section"), open, full)
+	fmt.Fprintf(&desc, "**%s** · %d open · %d full\n\n", plural(len(sections), "section"), open, full)
 	desc.WriteString(body)
 	fmt.Fprintf(&desc, "\n\n*Watch one: `/watch %s %s`*", courseLabel(code), exampleSection(sections))
 
@@ -362,15 +359,10 @@ func searchView(code, termName string, sections []store.Section, page int) view 
 		color = colorOpen
 	}
 
-	footer := footerNote
-	if pages > 1 {
-		footer = fmt.Sprintf("Page %d of %d · %s", cur+1, pages, footerNote)
-	}
 	e := &discordgo.MessageEmbed{
 		Title:       courseHeader(code, title, termName),
 		Description: truncateRunes(desc.String(), maxEmbedDesc),
 		Color:       color,
-		Footer:      &discordgo.MessageEmbedFooter{Text: footer},
 	}
 	if !newest.IsZero() {
 		e.Timestamp = newest.UTC().Format(time.RFC3339)
@@ -437,18 +429,13 @@ func watchlistView(items []store.WatchItem, termNames map[string]string, page in
 	}
 
 	body, cur, pages := renderPage(rows, page, pageSize)
-	desc := fmt.Sprintf("Watching **%s** · 🟢 %d open now\n\n%s\n\n*Stop with `/unwatch <course> [section]`*",
+	desc := fmt.Sprintf("Watching **%s** · %d open now\n\n%s\n\n*Stop with `/unwatch <course> [section]`*",
 		plural(len(items), "section"), open, body)
 
-	footer := footerNote
-	if pages > 1 {
-		footer = fmt.Sprintf("Page %d of %d · %s", cur+1, pages, footerNote)
-	}
 	e := &discordgo.MessageEmbed{
 		Title:       "Your watchlist",
 		Description: truncateRunes(desc, maxEmbedDesc),
 		Color:       colorNeutral,
-		Footer:      &discordgo.MessageEmbedFooter{Text: footer},
 	}
 	if !newest.IsZero() {
 		e.Timestamp = newest.UTC().Format(time.RFC3339)
@@ -461,7 +448,7 @@ func matchesView(query, termName string, hits []store.CourseHit) view {
 	var sb strings.Builder
 	for _, h := range hits {
 		line := courseHeader(h.CourseCode, h.CourseTitle, "")
-		fmt.Fprintf(&sb, "**%s**\n%s · 🟢 %d with seats\n\n", line, plural(h.Sections, "section"), h.OpenSections)
+		fmt.Fprintf(&sb, "**%s**\n%s · %d with seats\n\n", line, plural(h.Sections, "section"), h.OpenSections)
 	}
 	sb.WriteString("*Use `/search <exact code>` for section detail*")
 	title := fmt.Sprintf("Courses matching “%s”", truncateRunes(query, 80))
@@ -472,7 +459,6 @@ func matchesView(query, termName string, hits []store.CourseHit) view {
 		Title:       truncateRunes(title, maxEmbedTitle),
 		Description: truncateRunes(sb.String(), maxEmbedDesc),
 		Color:       colorNeutral,
-		Footer:      &discordgo.MessageEmbedFooter{Text: footerNote},
 	}}
 }
 
@@ -509,10 +495,9 @@ func watchConfirmView(code, title, termName string, targets []store.Section, add
 	sb.WriteString("\nYou'll get a DM when a **full** section frees up. An already-open section stays quiet until it fills and frees again.")
 
 	return view{embed: &discordgo.MessageEmbed{
-		Title:       courseHeaderPrefixed("✅ ", code, title, termName),
+		Title:       courseHeader(code, title, termName),
 		Description: truncateRunes(sb.String(), maxEmbedDesc),
 		Color:       colorOpen,
-		Footer:      &discordgo.MessageEmbedFooter{Text: footerNote},
 	}}
 }
 
@@ -533,7 +518,6 @@ func alertEmbed(d store.Delivery, termName string) *discordgo.MessageEmbed {
 			{Name: "Seats open", Value: fmt.Sprintf("**%d**", seats), Inline: true},
 			{Name: "Enrolment", Value: fmt.Sprintf("%s `%d/%d`", fillBar(enrolled, capacity), enrolled, capacity), Inline: true},
 		},
-		Footer:    &discordgo.MessageEmbedFooter{Text: footerNote},
 		Timestamp: d.DetectedAt.UTC().Format(time.RFC3339),
 	}
 }

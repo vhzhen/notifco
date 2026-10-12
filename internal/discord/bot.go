@@ -593,12 +593,8 @@ func (b *Bot) handleAutocomplete(ctx context.Context, s *discordgo.Session, i *d
 		norm := source.NormalizeCourseCode(codeVal)
 		if sections, err := b.opts.Store.SectionsByCourse(ctx, string(b.opts.Term), norm); err == nil {
 			for _, sec := range sortSections(sections) {
-				icon := "🔴"
-				if sec.SeatsOpen() > 0 {
-					icon = "🟢"
-				}
 				choices = append(choices, &discordgo.ApplicationCommandOptionChoice{
-					Name:  truncateRunes(fmt.Sprintf("%s %s (%d/%d)", icon, sec.SectionName, sec.Enrolled, sec.Capacity), maxChoiceName),
+					Name:  truncateRunes(fmt.Sprintf("%s (%d/%d)", sec.SectionName, sec.Enrolled, sec.Capacity), maxChoiceName),
 					Value: sec.SectionName,
 				})
 				if len(choices) >= 25 {
