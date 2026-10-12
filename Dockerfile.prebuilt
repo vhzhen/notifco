@@ -1,0 +1,27 @@
+# Runtime-only image. Expects a binary cross-compiled on your machine:
+#
+#   make dist-linux
+#
+# Why this exists: compiling Go inside a 1 GB VM (GCP's always-free e2-micro)
+# thrashes swap badly. Measured on that box, the compile step sat at >80%
+# iowait with the compiler holding ~395 MB RSS and had not finished after 10
+# minutes, eventually taking the machine unreachable. The same build
+# cross-compiles locally in about 8 seconds.
+#
+# Use with:
+#   docker compose -f docker-compose.yml -f docker-compose.gcp.yml \
+#                  -f docker-compose.prebuilt.yml up -d
+FROM alpine:3.21
+
+# ca-certificates for TLS to the UW API and Discord; tzdata because UW term
+# dates are reasoned about in Canada/Eastern.
+RUN apk add --no-cache ca-certificates tzdata \
+    && adduser -D -u 10001 notifco
+
+COPY dist/notifco-linux-amd64 /usr/local/bin/notifco
+
+USER notifco
+EXPOSE 9090
+
+ENTRYPOINT ["/usr/local/bin/notifco"]
+CMD ["all"]

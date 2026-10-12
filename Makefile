@@ -17,6 +17,13 @@ build: ## Build the binary into bin/
 	go build -trimpath -ldflags="-s -w" -o $(BIN_DIR)/$(BINARY) ./cmd/notifco
 	@echo "built $(BIN_DIR)/$(BINARY)"
 
+.PHONY: dist-linux
+dist-linux: ## Cross-compile a static linux/amd64 binary for prebuilt deploys
+	@mkdir -p dist
+	GOOS=linux GOARCH=amd64 CGO_ENABLED=0 \
+		go build -trimpath -ldflags="-s -w" -o dist/notifco-linux-amd64 ./cmd/notifco
+	@ls -lh dist/notifco-linux-amd64 | awk '{print "built dist/notifco-linux-amd64 (" $$5 ")"}'
+
 .PHONY: run
 run: ## Run in all-in-one mode (reads .env)
 	@set -a; [ -f .env ] && . ./.env; set +a; go run ./cmd/notifco all
@@ -94,4 +101,4 @@ dev-infra: ## Start only Postgres + Redis (run the bot with `make run`)
 
 .PHONY: clean
 clean: ## Remove build and test artefacts
-	rm -rf $(BIN_DIR) coverage.out load-results.txt
+	rm -rf $(BIN_DIR) dist coverage.out load-results.txt

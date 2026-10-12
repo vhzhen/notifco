@@ -1,0 +1,19 @@
+# Builds the app image from a prebuilt binary instead of compiling in-place.
+#
+# Required on memory-constrained hosts. Compiling Go needs more RAM than GCP's
+# always-free e2-micro (1 GB) has: the build thrashes swap and can take the
+# machine unreachable. Cross-compile on your own machine instead:
+#
+#   make dist-linux
+#   # copy dist/notifco-linux-amd64 to the VM's checkout, then:
+#   docker compose -f docker-compose.yml -f docker-compose.gcp.yml \
+#                  -f docker-compose.prebuilt.yml up -d
+#
+# The binary is static (CGO disabled), so the runtime image is just Alpine plus
+# certificates and tzdata.
+
+services:
+  notifco:
+    build:
+      context: .
+      dockerfile: Dockerfile.prebuilt
