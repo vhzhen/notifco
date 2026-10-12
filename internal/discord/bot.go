@@ -27,6 +27,24 @@ type TermNamer interface {
 	TermName(ctx context.Context, term source.TermCode) (string, error)
 }
 
+// NoteProvider supplies per-section reserve notes, keyed by class number.
+// Implemented by the schedule-page client. Optional: a nil provider just means
+// /search shows no reserve lines.
+type NoteProvider interface {
+	Reserves(ctx context.Context, term source.TermCode, subject, catalog string) (map[int][]string, error)
+}
+
+const (
+	// notesWaitSearch is how long /search waits for reserve notes. The command
+	// is already deferred, so there is room, but the notes are a nice-to-have and
+	// must not make /search feel slow.
+	notesWaitSearch = 2500 * time.Millisecond
+	// notesWaitPager is the wait on a Previous/Next click. Discord requires an
+	// answer within 3 seconds and there is no deferral here, so this is short;
+	// by then the first /search has normally already cached the notes.
+	notesWaitPager = 700 * time.Millisecond
+)
+
 // Options configures the Bot.
 type Options struct {
 	Token   string
@@ -35,7 +53,9 @@ type Options struct {
 	Store   *store.Store
 	Ensurer CourseEnsurer
 	Namer   TermNamer
-	Logger  *slog.Logger
+	// Notes supplies reserve notes. May be nil.
+	Notes  NoteProvider
+	Logger *slog.Logger
 	// Term is the term commands operate on.
 	Term source.TermCode
 }
@@ -312,7 +332,7 @@ func (b *Bot) handleComponent(ctx context.Context, s *discordgo.Session, i *disc
 	v, err := b.safely("pager:"+kind, func() (view, error) {
 		switch kind {
 		case "s":
-			return b.searchPage(ctx, key, page)
+			return b.searchPage(ctx, key, page, notesWaitPager)
 		case "w":
 			return b.watchlistPage(ctx, interactionUserID(i), page)
 		default:
@@ -366,7 +386,7 @@ func (b *Bot) cmdSearch(ctx context.Context, data discordgo.ApplicationCommandIn
 	}
 
 	code := source.NormalizeCourseCode(query)
-	if v, err := b.searchPage(ctx, code, 0); err != nil {
+	if v, err := b.searchPage(ctx, code, 0, notesWaitSearch); err != nil {
 		return view{}, err
 	} else if v.embed != nil {
 		return v, nil
@@ -386,8 +406,8 @@ func (b *Bot) cmdSearch(ctx context.Context, data discordgo.ApplicationCommandIn
 
 // searchPage renders one page of a course's sections. It returns a zero view
 // (nil embed) when the course has no sections, so callers can fall back to a
-// text search.
-func (b *Bot) searchPage(ctx context.Context, code string, page int) (view, error) {
+// text search. wait bounds how long to wait for reserve notes.
+func (b *Bot) searchPage(ctx context.Context, code string, page int, wait time.Duration) (view, error) {
 	code = source.NormalizeCourseCode(code)
 	sections, err := b.opts.Store.SectionsByCourse(ctx, string(b.opts.Term), code)
 	if err != nil {
@@ -396,7 +416,39 @@ func (b *Bot) searchPage(ctx context.Context, code string, page int) (view, erro
 	if len(sections) == 0 {
 		return view{}, nil
 	}
-	return searchView(code, b.termName(ctx, b.opts.Term), sections, page), nil
+	sections, notesUnavailable := b.attachReserves(ctx, code, sections, wait)
+	return searchViewWith(code, b.termName(ctx, b.opts.Term), sections, page,
+		viewOptions{NotesUnavailable: notesUnavailable}), nil
+}
+
+// attachReserves fills in each section's Reserves from the notes provider.
+//
+// It can never make /search fail: any error, timeout or missing provider just
+// leaves the sections as they were. The returned flag is true only when notes
+// were wanted and could not be had, so the embed can say so instead of looking
+// like the course has no reserves.
+func (b *Bot) attachReserves(ctx context.Context, code string, sections []store.Section, wait time.Duration) ([]store.Section, bool) {
+	if b.opts.Notes == nil {
+		return sections, false
+	}
+	subject, catalog, err := source.SplitCourseCode(code)
+	if err != nil {
+		return sections, false
+	}
+	nctx, cancel := context.WithTimeout(ctx, wait)
+	defer cancel()
+
+	notes, err := b.opts.Notes.Reserves(nctx, b.opts.Term, subject, catalog)
+	if err != nil {
+		b.log.Debug("reserve notes unavailable", "course", code, "err", err)
+		return sections, true
+	}
+	out := make([]store.Section, len(sections))
+	copy(out, sections)
+	for i := range out {
+		out[i].Reserves = notes[out[i].ClassNumber]
+	}
+	return out, false
 }
 
 // --- /watch -----------------------------------------------------------------

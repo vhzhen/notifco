@@ -29,8 +29,12 @@ Each section shows its fill, its 4-digit class number (the one you enter on Ques
 > &nbsp;&nbsp;&nbsp;&nbsp;↳ 8:30 AM - 9:20 AM · Monday, Wednesday, Friday
 > `LEC 002` ▰▰▰▰▰▰▰▱ `109/120` · `6254`
 > &nbsp;&nbsp;&nbsp;&nbsp;↳ 9:30 AM - 10:20 AM · Monday, Wednesday, Friday
+> `LEC 001` ▰▰▰▰▰▰▰▱ `100/120` · `6112`
+> &nbsp;&nbsp;&nbsp;&nbsp;↳ 8:30 AM - 9:50 AM · Tuesday, Thursday
+> &nbsp;&nbsp;&nbsp;&nbsp;↳ Reserve: 1A AFM students
+> &nbsp;&nbsp;&nbsp;&nbsp;↳ Reserve: Year 1 students
 
-A section that meets at several times gets one line per time, and one with no scheduled time says `Time TBA` (or `Online`).
+A section that meets at several times gets one line per time, and one with no scheduled time says `Time TBA` (or `Online`). When UW lists reserved seats (e.g. for first-year students of a program), each appears on its own `Reserve:` line.
 
 Three things to know:
 
@@ -126,9 +130,18 @@ Cloudflare and CloudFront can't host this: a Discord gateway bot holds a long-li
 
 ## Data and privacy
 
-Reads exactly one upstream: the public [UW Open Data API v3](https://openapi.data.uwaterloo.ca/api-docs/), whose stated scope is publicly visible data only.
+Seat counts, times and course titles come from the public [UW Open Data API v3](https://openapi.data.uwaterloo.ca/api-docs/), whose stated scope is publicly visible data only.
 
-**Nothing behind a login is touched** — no Quest scraping, no credentials, no SourceAPI. The only thing stored about you is your Discord user ID and the sections you chose to watch. `/unwatch` removes the subscription and cancels any undelivered alert.
+**Reserve notes come from a second source.** Lines like `Reserve: Year 1 Math Students` are not in that API (a class there has sixteen fields and none holds them), so notifco reads them from UW's public [Schedule of Classes](https://classes.uwaterloo.ca/) page. Be clear about what that is:
+
+- It is an HTML page, not an API, and it publishes no terms of use and no `robots.txt` (that URL returns 404). No login is involved.
+- notifco is deliberately gentle with it: only when someone runs `/search`, one request per course (not per section), at most one request per second across everyone, results cached for 6 hours (failures for 5 minutes), identical concurrent lookups share one request, and an honest `notifco` User-Agent linking to this repo.
+- It is optional and never required. If the page is slow, down, or its layout changes, `/search` still works and says "Reserve notes are unavailable right now".
+- To turn it off entirely, set `NOTIFCO_SCHEDULE_NOTES=false`. It is also always off with the mock source, so CI and local development never contact it.
+
+Silence is not permission. If UW objects to this, disable it and open an issue.
+
+**Nothing behind a login is touched**: no Quest scraping, no credentials, no SourceAPI. The only thing stored about you is your Discord user ID and the sections you chose to watch. `/unwatch` removes the subscription and cancels any undelivered alert. Reserve notes are never stored.
 
 UWFlow is MIT licensed and was read as a reference only; no code, SQL, or templates were copied.
 
@@ -145,6 +158,7 @@ Environment variables only — see [.env.sample](./.env.sample) for the full lis
 | `NOTIFCO_POLL_INTERVAL` | `60s` | bounds detection lag |
 | `NOTIFCO_RATE_LIMIT` | `120` | upstream req/min. UW documents 120; ~266/min measured sustained with no throttling. Raise it to watch more courses — the client halves its own rate on a 429 and recovers, so it self-corrects |
 | `NOTIFCO_COOLDOWN` | `30m` | suppresses repeat alerts on a flapping section |
+| `NOTIFCO_SCHEDULE_NOTES` | `true` | show `Reserve:` notes, read from UW's public schedule page (a second source, see [Data and privacy](#data-and-privacy)). `false` disables it |
 
 Prometheus metrics and `/healthz` on `:9090`. `/metrics` is unauthenticated by design — keep it on localhost.
 

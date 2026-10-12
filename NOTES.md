@@ -510,7 +510,12 @@ Yes, with conditions. Findings from the UW OpenData project's own statements:
   **Quest** and WatIAM data, is **not used**. No credentials, no access, no attempt.
 - **Quest itself is never touched.** No scraping, no session replay, no stored student
   credentials, no `idp.uwaterloo.ca` Shibboleth flow.
-- notifco reads exactly one upstream: the keyed, public, self-serve Open Data API v3.
+- notifco's core (polling, detection, alerts) reads exactly one upstream: the keyed,
+  public, self-serve Open Data API v3.
+- **Added later, and a different kind of source:** reserve notes ("Reserve: Year 1
+  Students") are not in that API, so `/search` optionally reads them from UW's public
+  Schedule of Classes web page. See VERIFIED.md section 11 for what was found and how it
+  is limited. It is off with `NOTIFCO_SCHEDULE_NOTES=false`.
 - No personal student data is ingested. The only user data stored is a Discord user ID
   and the sections they chose to watch.
 

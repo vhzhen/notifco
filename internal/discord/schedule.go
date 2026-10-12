@@ -32,6 +32,9 @@ const (
 	// section (ECE 105 lectures meet at three different times) cannot crowd out
 	// the rest of the page.
 	maxSlotsShown = 4
+	// maxReservesShown caps reserve lines per section. PSYCH 101 sections have
+	// four, so real data fits; the cap bounds a malformed page.
+	maxReservesShown = 4
 )
 
 // scheduleLine formats one indented schedule line.
@@ -108,7 +111,65 @@ func searchSectionLine(s store.Section) string {
 	return line + onlineSuffix(s)
 }
 
-// searchRow is the section line with its schedule directly beneath it.
+// escapeMarkdown makes text we did not write safe to print on ONE line of an
+// embed.
+//
+// Reserve notes come from a third-party web page. Left alone, "[click](https://
+// ...)" would render as a link, "*" would restyle the rest of the line and
+// "<@123>" would render as a mention. A backslash before ASCII punctuation makes
+// Discord show the character literally.
+//
+// Line breaks are flattened to spaces so the text cannot start a second line,
+// where "# heading", "> quote" or "- list" would be live markdown. The parser
+// already does this, but this is the last thing before Discord, so it does not
+// rely on that. Control characters are dropped.
+func escapeMarkdown(s string) string {
+	var b strings.Builder
+	b.Grow(len(s) + 8)
+	for _, r := range s {
+		switch {
+		case r == '\n' || r == '\r' || r == '\t' || r == '\u2028' || r == '\u2029':
+			b.WriteByte(' ')
+			continue
+		case r < 0x20 || r == 0x7f:
+			continue
+		}
+		switch r {
+		case '\\', '*', '_', '~', '`', '|', '>', '<', '[', ']', '(', ')', '#', '@', ':', '-', '+', '!', '=':
+			b.WriteByte('\\')
+		}
+		b.WriteRune(r)
+	}
+	return strings.Join(strings.Fields(b.String()), " ")
+}
+
+// reserveLines returns one arrow line per reserve note:
+//
+//	↳ Reserve: Year 1 Math Students
+//
+// The "Reserve:" label is added here; the parser strips it.
+func reserveLines(s store.Section) []string {
+	if len(s.Reserves) == 0 {
+		return nil
+	}
+	shown, hidden := s.Reserves, 0
+	if len(shown) > maxReservesShown {
+		shown, hidden = shown[:maxReservesShown], len(shown)-maxReservesShown
+	}
+	lines := make([]string, 0, len(shown)+1)
+	for _, r := range shown {
+		lines = append(lines, scheduleLine("Reserve: "+escapeMarkdown(r)))
+	}
+	if hidden > 0 {
+		lines = append(lines, scheduleLine("+"+plural(hidden, "more reserve")))
+	}
+	return lines
+}
+
+// searchRow is the section line, then its schedule, then its reserve notes, each
+// on its own indented arrow line.
 func searchRow(s store.Section) string {
-	return searchSectionLine(s) + "\n" + strings.Join(scheduleLines(s), "\n")
+	lines := append([]string{searchSectionLine(s)}, scheduleLines(s)...)
+	lines = append(lines, reserveLines(s)...)
+	return strings.Join(lines, "\n")
 }

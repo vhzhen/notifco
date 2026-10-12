@@ -277,3 +277,82 @@ Verified after a graceful reboot: `notifco.service` journal shows
 `Starting` → `Finished`, all three containers healthy, Discord gateway
 reconnected with four commands registered, 7,891 courses loaded from the live
 API, and the nightly backup timer scheduled.
+
+---
+
+## 11. Reserve notes: a second source, and why
+
+Request: show "Reserve: Year 1 Students" style notes under a lecture in `/search`.
+
+**They are not in the Open Data API.** The Class schema has sixteen fields
+(courseId, courseOfferNumber, sessionCode, classSection, termCode, classNumber,
+courseComponent, associatedClassCode, maxEnrollmentCapacity, enrolledStudents,
+enrollConsentCode/Description, dropConsentCode/Description, scheduleData,
+instructorData). None carries reserve text. The only free text is the consent
+descriptions, which across 254 surveyed sections were only "No Consent Required"
+and "Department Consent Required". The spec's only `notes` fields belong to exam
+schedules and important dates. `Courses.requirementsDescription` is a course-level
+prerequisite list, not a per-section reserve.
+
+**They are on UW's public Schedule of Classes page.** For AFM 101:
+`Reserve: Year 1 Math Students`, in an italic row directly beneath the section it
+applies to, with the reserve's own capacity and enrolment alongside. Surveying 22
+courses (225 sections): 132 reserve rows, and 29 sections with more than one
+(PSYCH 101 sections carry four).
+
+**Joining.** Class numbers on the page equal the API's `classNumber` (CS 341: the
+same seven numbers), so notes attach to the API's sections by class number.
+
+**What the site is.** An HTML page, not an API. Landing page HTTP 200, no login.
+`/robots.txt` returns 404. No terms-of-use or disclaimer text on the lookup pages
+(891 and 1840 characters of text checked). Response time about 50 ms. A nonexistent
+course returns HTTP 200 with zero sections. Courses numbered 500 and above that are
+graduate (CS 686) appear only at `level=grad`; undergraduate (`level=under`) returns
+zero sections for them.
+
+**Silence is not permission.** The project's rule is "nothing behind a login", and
+that holds, but this source has no stated terms either way. So the integration is
+built to be light and removable:
+
+| Behaviour | Value |
+|---|---|
+| When it is contacted | only when someone runs `/search` for that course |
+| Requests per course | 1 (a second only for 500+ courses that miss at the first level) |
+| Global rate | 1 request per second, burst 2 |
+| Cache | 6 hours for success, 5 minutes for failure |
+| Concurrent identical lookups | coalesced into one request |
+| Load shedding | refused outright beyond 6 lookups in flight |
+| Cache size | bounded at 2000 entries |
+| Response size | capped at 1 MiB; oversize is refused, not truncated |
+| Redirects | at most 3, never off the original host |
+| Inputs | validated against `^[A-Z]{2,8}$` and `^[0-9]{3}[A-Z]?$` before any URL is built |
+| Identification | `User-Agent: notifco/0.1 (+https://github.com/vhzhen/notifco)` |
+| Kill switch | `NOTIFCO_SCHEDULE_NOTES=false` |
+| Mock source | always off, so CI and local runs never contact it |
+
+**It can never break `/search`.** The lookup runs detached from the caller, so a
+slow response still warms the cache. `/search` waits at most 2.5 s for it and a
+Previous/Next click at most 0.7 s (Discord needs an answer within 3 s and a button
+click cannot be deferred). Any failure, timeout, overload or layout change leaves
+the sections as they were and adds "Reserve notes are unavailable right now" so a
+missing line is not mistaken for "no reserves".
+
+**Layout drift is detected, not assumed away.** If a page contains the text
+"Reserve:" but zero reserve rows were parsed, that is reported as a layout change
+instead of "no reserves". It fired for real during development: a parser bug
+(returning after a `<tr>`, so the nested section table was never walked) found zero
+sections on every page while the word still appeared 18 times in PSYCH 101.
+
+**Untrusted text.** Notes come from a third-party page and are printed into an
+embed. They are cleaned in the parser (control characters, invalid UTF-8,
+non-breaking spaces, length capped at 160 characters, at most 12 per section) and
+again at render time (markdown and mention characters backslash-escaped, line breaks
+flattened so one note is always one line). All 15 distinct real notes across the
+captured pages pass through unchanged.
+
+**Reserve notes are never stored.** They are fetched per request and not written to
+Postgres, so there is no stale copy to correct.
+
+Fixtures: eight real pages in `internal/source/schedpage/testdata` (AFM 101,
+PSYCH 101, CS 135, CS 341, ECE 105, MATH 135, graduate CS 686, and an empty result).
+Their instructor and room cells are empty, so they carry no personal data.

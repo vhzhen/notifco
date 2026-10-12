@@ -139,3 +139,64 @@ func TestRedactedHidesKey(t *testing.T) {
 		t.Errorf("Redacted() should report key presence, got %q", out)
 	}
 }
+
+func TestScheduleNotesDefaultsOn(t *testing.T) {
+	t.Setenv("UW_API_KEY", "dummy-key")
+	t.Setenv("NOTIFCO_SOURCE", "uwapi")
+	t.Setenv("NOTIFCO_SCHEDULE_NOTES", "")
+	cfg, err := Load("poller")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !cfg.ScheduleNotes || !cfg.UseScheduleNotes() {
+		t.Error("schedule notes should default to on with a real source")
+	}
+}
+
+func TestScheduleNotesKillSwitch(t *testing.T) {
+	t.Setenv("UW_API_KEY", "dummy-key")
+	t.Setenv("NOTIFCO_SOURCE", "uwapi")
+	for _, off := range []string{"false", "0", "no", "off", "FALSE", " Off "} {
+		t.Setenv("NOTIFCO_SCHEDULE_NOTES", off)
+		cfg, err := Load("poller")
+		if err != nil {
+			t.Fatalf("%q: %v", off, err)
+		}
+		if cfg.UseScheduleNotes() {
+			t.Errorf("NOTIFCO_SCHEDULE_NOTES=%q did not switch it off", off)
+		}
+	}
+	for _, on := range []string{"true", "1", "yes", "ON"} {
+		t.Setenv("NOTIFCO_SCHEDULE_NOTES", on)
+		cfg, err := Load("poller")
+		if err != nil || !cfg.UseScheduleNotes() {
+			t.Errorf("%q: (%v, %v), want on", on, cfg != nil && cfg.UseScheduleNotes(), err)
+		}
+	}
+}
+
+// TestScheduleNotesNeverOnWithTheMock: CI and local development must never
+// reach out to UW's website, whatever the flag says.
+func TestScheduleNotesNeverOnWithTheMock(t *testing.T) {
+	t.Setenv("UW_API_KEY", "")
+	t.Setenv("NOTIFCO_SOURCE", "mock")
+	t.Setenv("NOTIFCO_SCHEDULE_NOTES", "true")
+	cfg, err := Load("poller")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !cfg.ScheduleNotes {
+		t.Fatal("the flag itself should still read true")
+	}
+	if cfg.UseScheduleNotes() {
+		t.Error("the mock source must disable schedule notes regardless of the flag")
+	}
+}
+
+func TestScheduleNotesRejectsGarbage(t *testing.T) {
+	t.Setenv("NOTIFCO_SOURCE", "mock")
+	t.Setenv("NOTIFCO_SCHEDULE_NOTES", "maybe")
+	if _, err := Load("poller"); err == nil {
+		t.Fatal("a non-boolean value should be an error, not silently treated as on or off")
+	}
+}

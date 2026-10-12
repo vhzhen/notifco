@@ -33,6 +33,7 @@ import (
 	"github.com/vhzhen/notifco/internal/poller"
 	"github.com/vhzhen/notifco/internal/source"
 	"github.com/vhzhen/notifco/internal/source/mock"
+	"github.com/vhzhen/notifco/internal/source/schedpage"
 	"github.com/vhzhen/notifco/internal/source/uwapi"
 	"github.com/vhzhen/notifco/internal/store"
 )
@@ -171,6 +172,17 @@ func run(role string) error {
 	}
 
 	if role == "bot" || role == "all" {
+		// Reserve notes come from UW's public schedule page, a second upstream
+		// beyond the Open Data API. Built only when enabled, and never with the
+		// mock source. The interface value must stay a true nil when off:
+		// assigning a nil *Client would make `Notes != nil` pass in the bot.
+		var notes discord.NoteProvider
+		if cfg.UseScheduleNotes() {
+			notes = schedpage.New(schedpage.Options{Logger: log})
+			log.Info("reserve notes enabled (reads UW's public schedule page, on demand, cached)")
+		} else {
+			log.Info("reserve notes disabled")
+		}
 		bot, err = discord.New(discord.Options{
 			Token:   cfg.DiscordToken,
 			AppID:   cfg.DiscordAppID,
@@ -178,6 +190,7 @@ func run(role string) error {
 			Store:   st,
 			Ensurer: pol,
 			Namer:   src,
+			Notes:   notes,
 			Logger:  log,
 			Term:    term,
 		})

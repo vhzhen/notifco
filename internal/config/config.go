@@ -35,6 +35,14 @@ type Config struct {
 	// costs Postgres memory, and a 1 GB VM cannot afford many.
 	DBMaxConns int
 
+	// ScheduleNotes enables reserve notes ("Reserve: Year 1 students") in
+	// /search. They are NOT in the Open Data API, so this reads UW's public
+	// Schedule of Classes web page: a second upstream with no published terms.
+	// It is on by default but is the one thing here to switch off first if UW
+	// objects. Ignored (always off) with the mock source, so CI and local runs
+	// never touch the site.
+	ScheduleNotes bool
+
 	// Poller
 	PollInterval time.Duration
 	HotInterval  time.Duration
@@ -55,6 +63,10 @@ type Config struct {
 
 // SourceMock reports whether the mock upstream is in use.
 func (c *Config) SourceMock() bool { return c.Source == "mock" }
+
+// UseScheduleNotes reports whether the schedule page should actually be read:
+// enabled in config AND not running on the mock source.
+func (c *Config) UseScheduleNotes() bool { return c.ScheduleNotes && !c.SourceMock() }
 
 // Load reads configuration from the environment and validates it for the given
 // role ("bot", "poller", or "all"). Validation is role-aware because the poller
@@ -109,6 +121,9 @@ func Load(role string) (*Config, error) {
 		return nil, err
 	}
 	if c.DBMaxConns, err = envInt("NOTIFCO_DB_MAX_CONNS", 16); err != nil {
+		return nil, err
+	}
+	if c.ScheduleNotes, err = envBool("NOTIFCO_SCHEDULE_NOTES", true); err != nil {
 		return nil, err
 	}
 
@@ -174,9 +189,9 @@ func (c *Config) validate(role string) error {
 // Redacted returns a loggable summary with no secrets in it.
 func (c *Config) Redacted() string {
 	return fmt.Sprintf(
-		"source=%s key=%s poll=%s hot=%s workers=%d/%d rate=%d/min cooldown=%s attempts=%d",
+		"source=%s key=%s poll=%s hot=%s workers=%d/%d rate=%d/min cooldown=%s attempts=%d schedule_notes=%v",
 		c.Source, present(c.UWAPIKey), c.PollInterval, c.HotInterval,
-		c.PollWorkers, c.NotifyWorkers, c.RateLimit, c.Cooldown, c.MaxAttempts,
+		c.PollWorkers, c.NotifyWorkers, c.RateLimit, c.Cooldown, c.MaxAttempts, c.UseScheduleNotes(),
 	)
 }
 
@@ -204,6 +219,20 @@ func envInt(key string, def int) (int, error) {
 		return 0, fmt.Errorf("%s: %q is not an integer", key, v)
 	}
 	return n, nil
+}
+
+func envBool(key string, def bool) (bool, error) {
+	v := strings.TrimSpace(os.Getenv(key))
+	if v == "" {
+		return def, nil
+	}
+	switch strings.ToLower(v) {
+	case "1", "true", "yes", "on":
+		return true, nil
+	case "0", "false", "no", "off":
+		return false, nil
+	}
+	return false, fmt.Errorf("%s: %q is not a boolean (use true or false)", key, v)
 }
 
 func envDuration(key string, def time.Duration) (time.Duration, error) {

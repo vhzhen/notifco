@@ -372,8 +372,21 @@ func pagerComponents(kind, key string, page, pages int) []discordgo.MessageCompo
 
 // --- views ------------------------------------------------------------------
 
+// viewOptions carries rendering switches that are not part of the data.
+type viewOptions struct {
+	// NotesUnavailable says reserve notes were wanted but could not be fetched,
+	// so the embed admits it. Without this a missing line would read as "this
+	// section has no reserve".
+	NotesUnavailable bool
+}
+
 // searchView renders one course with its sections, paginated.
 func searchView(code, termName string, sections []store.Section, page int) view {
+	return searchViewWith(code, termName, sections, page, viewOptions{})
+}
+
+// searchViewWith is searchView with rendering options.
+func searchViewWith(code, termName string, sections []store.Section, page int, opts viewOptions) view {
 	sections = sortSections(sections)
 	title := ""
 	if len(sections) > 0 {
@@ -401,6 +414,9 @@ func searchView(code, termName string, sections []store.Section, page int) view 
 	fmt.Fprintf(&desc, "**%s** · %d open · %d full\n\n", plural(len(sections), "section"), open, full)
 	desc.WriteString(body)
 	fmt.Fprintf(&desc, "\n\n*Watch one: `/watch %s %s`*", courseLabel(code), exampleSection(sections))
+	if opts.NotesUnavailable {
+		desc.WriteString("\n*Reserve notes are unavailable right now.*")
+	}
 
 	color := colorFull
 	if open > 0 {

@@ -229,6 +229,10 @@ type Section struct {
 	// Meetings are the weekly slots; empty means online or TBA.
 	Meetings   []source.Meeting
 	ObservedAt time.Time
+	// Reserves are "Reserve:" notes such as "Year 1 Math Students". They are
+	// NOT stored and NOT in the Open Data API: the bot fills them in per request
+	// from UW's public schedule page, so this is empty unless that succeeded.
+	Reserves []string
 }
 
 // SeatsOpen returns free seats, never negative.
