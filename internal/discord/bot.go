@@ -7,7 +7,6 @@ import (
 	"fmt"
 	"log/slog"
 	"strings"
-	"sync/atomic"
 	"time"
 
 	"github.com/bwmarrin/discordgo"
@@ -48,9 +47,6 @@ type Bot struct {
 	log     *slog.Logger
 	session *discordgo.Session
 
-	// ready distinguishes the GuildCreate burst emitted during the initial
-	// connect from genuine joins that happen afterwards.
-	ready atomic.Bool
 	// appID is resolved once the session is open.
 	appID string
 }
@@ -140,7 +136,6 @@ func commands() []*discordgo.ApplicationCommand {
 // Run connects, registers commands, and serves until ctx is cancelled.
 func (b *Bot) Run(ctx context.Context) error {
 	b.session.AddHandler(func(s *discordgo.Session, r *discordgo.Ready) {
-		b.ready.Store(true)
 		b.log.Info("discord connected", "user", r.User.Username, "guilds", len(r.Guilds))
 	})
 	b.session.AddHandler(b.handleInteraction)
@@ -189,25 +184,41 @@ func (b *Bot) Run(ctx context.Context) error {
 	return nil
 }
 
-// handleGuildCreate gives a newly joined guild an immediate guild-scoped copy of
-// the command set, so users can run commands the moment they invite the bot
-// instead of waiting for global propagation.
+// maxGuildFastRegister bounds per-guild command registration.
 //
-// Only genuine joins are handled. discordgo also emits GuildCreate for every
-// existing guild during the initial connect, and registering for all of them on
-// each boot would mean one API call per guild at startup.
-func (b *Bot) handleGuildCreate(_ *discordgo.Session, g *discordgo.GuildCreate) {
-	if !b.ready.Load() || b.opts.GuildID != "" || b.appID == "" {
+// GuildCreate fires for every guild at connect, not just genuine joins, so this
+// runs once per guild on every boot. That is desirable at small scale — it
+// gives instant commands and self-heals stale guild-scoped sets after a command
+// rename — but it is one API call per guild, so above this count notifco relies
+// on global registration alone.
+const maxGuildFastRegister = 50
+
+// handleGuildCreate gives a guild an immediate guild-scoped copy of the command
+// set, so users can run commands the moment the bot is invited instead of
+// waiting for global propagation.
+//
+// Note on ordering: discordgo dispatches Ready BEFORE the GuildCreate burst for
+// existing guilds, so this cannot distinguish a genuine join from the initial
+// load. That is fine and in fact useful: re-registering on boot keeps
+// guild-scoped sets from drifting out of date with the global set, which would
+// otherwise shadow it with stale commands.
+func (b *Bot) handleGuildCreate(s *discordgo.Session, g *discordgo.GuildCreate) {
+	// Guild-scoped dev mode already registered to its one guild.
+	if b.opts.GuildID != "" || b.appID == "" {
+		return
+	}
+	if n := len(s.State.Guilds); n > maxGuildFastRegister {
+		b.log.Debug("skipping per-guild command registration; relying on global",
+			"guilds", n, "cap", maxGuildFastRegister)
 		return
 	}
 	if _, err := b.session.ApplicationCommandBulkOverwrite(b.appID, g.ID, commands()); err != nil {
-		// Not fatal: global registration still covers this guild shortly.
-		b.log.Warn("could not fast-register commands for new guild",
+		// Not fatal: global registration still covers this guild.
+		b.log.Warn("could not fast-register commands for guild",
 			"guild", g.ID, "name", g.Name, "err", err)
 		return
 	}
-	b.log.Info("joined guild; commands available immediately",
-		"guild", g.ID, "name", g.Name)
+	b.log.Info("commands available in guild", "guild", g.ID, "name", g.Name)
 }
 
 func (b *Bot) handleInteraction(s *discordgo.Session, i *discordgo.InteractionCreate) {
