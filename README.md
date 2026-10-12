@@ -5,6 +5,9 @@ get a DM the moment a full section has a seat open up.
 
 [![CI](https://github.com/vhzhen/notifco/actions/workflows/ci.yml/badge.svg)](https://github.com/vhzhen/notifco/actions/workflows/ci.yml)
 
+**Status:** working and deployed. Running 24/7 against the live UW API on a free-tier
+VM, polling every 60 s. MIT licensed — [self-host it](#setup), it costs nothing to run.
+
 ## Why
 
 [UWFlow](https://github.com/UWFlow/uwflow) already has "notify me when a course frees
@@ -232,6 +235,18 @@ docker compose up -d
 docker compose logs -f notifco
 ```
 
+> **On a host with ~1 GB of RAM, do not build in place.** The Go compiler needs more
+> memory than that, and it will thrash swap rather than finish. Cross-compile instead —
+> it takes about 8 seconds:
+>
+> ```sh
+> make dist-linux        # -> dist/notifco-linux-amd64, static, ~17 MB
+> # copy the binary to the host's checkout, then:
+> docker compose -f docker-compose.yml -f docker-compose.prebuilt.yml up -d
+> ```
+>
+> Full walkthrough in [deploy/gcp/README.md](./deploy/gcp/README.md).
+
 ### Local development
 
 ```sh
@@ -323,19 +338,37 @@ controls. Detection lag is *bounded* by the poll interval and reported separatel
 
 ## Deployment
 
-Two $0 paths, both fully documented:
+Two $0 paths, both walked end to end:
 
-- **[deploy/gcp/README.md](./deploy/gcp/README.md)** — Google Cloud always-free `e2-micro`.
-  Covers the three things that silently cost money (region, disk type, hour-based VM
-  allowance), the swap step that 1 GB of RAM requires, and a $1 budget alert.
-  Use `docker-compose.gcp.yml` alongside the base file.
-- **[deploy/oracle/README.md](./deploy/oracle/README.md)** — Oracle Cloud Always Free ARM
-  VM. Far more RAM (12 GB), but includes an iptables gotcha and Oracle reclaims idle
-  instances.
+- **[deploy/gcp/README.md](./deploy/gcp/README.md)** — Google Cloud always-free
+  `e2-micro`. **This is the one that has actually been deployed and verified.** Covers
+  the three things that silently cost money (region, disk type, the hour-based VM
+  allowance), the swap step 1 GB requires, the read-only deploy key for a private repo,
+  the systemd unit and backup timer, and the hard-reset gotcha that silently masks the
+  unit. Use `docker-compose.gcp.yml` + `docker-compose.prebuilt.yml` alongside the base
+  file.
+- **[deploy/oracle/README.md](./deploy/oracle/README.md)** — Oracle Cloud Always Free
+  ARM VM. Far more RAM (12 GB, so it can build in place), but has an iptables gotcha and
+  Oracle reclaims idle instances.
 
-Free-tier traps worth knowing either way: Render's free tier spins down when idle, which
-is fatal for a poller, and Neon's free Postgres allows 100 compute-hours a month with
-scale-to-zero — an always-on bot never idles and runs dry mid-month.
+Measured on the live `e2-micro` deployment:
+
+| Container | Using | Limit |
+|---|---|---|
+| notifco | 20 MB | 180 MB |
+| postgres | 22 MB | 256 MB |
+| redis | 6 MB | 80 MB |
+
+~48 MB total against a 516 MB budget, ~530 MB host memory still available, swap
+essentially untouched. The 1 GB ceiling only bites while *compiling*, which is why the
+prebuilt path exists.
+
+Free-tier traps worth knowing whichever host you pick: Render's free tier spins down when
+idle, which is fatal for a poller, and Neon's free Postgres allows 100 compute-hours a
+month with scale-to-zero — an always-on bot never idles and runs dry mid-month. Cloudflare
+and CloudFront cannot host this at all: a Discord gateway bot holds a long-lived outbound
+WebSocket, so it needs a process that simply stays running, not a CDN or a per-request
+serverless runtime.
 
 ## How notifco differs from UWFlow
 
@@ -403,7 +436,13 @@ internal/
   metrics/              Prometheus collectors
 test/integration/       end-to-end on mock source, real PG + Redis
 test/load/              10k-subscription benchmark (build tag `load`)
-deploy/oracle/          $0 deployment guide
+deploy/gcp/             $0 Google Cloud guide (deployed and verified)
+deploy/oracle/          $0 Oracle Cloud guide
+Dockerfile              builds from source (needs >1 GB RAM)
+Dockerfile.prebuilt     runtime-only; use with `make dist-linux`
+docker-compose.yml      base stack
+docker-compose.gcp.yml  memory limits tuned for a 1 GB e2-micro
+docker-compose.prebuilt.yml  use a cross-compiled binary
 ```
 
 ## License
