@@ -1,449 +1,139 @@
 # notifco
 
-A Discord bot for University of Waterloo students. Search courses, watch sections, and
-get a DM the moment a full section has a seat open up.
+Get a DM the moment a full University of Waterloo course section has a seat open up.
 
+[![Add to Discord](https://img.shields.io/badge/Add%20to%20Discord-5865F2?style=for-the-badge&logo=discord&logoColor=white)](https://discord.com/oauth2/authorize?client_id=1558968102463471638&scope=bot+applications.commands&permissions=3072)
 [![CI](https://github.com/vhzhen/notifco/actions/workflows/ci.yml/badge.svg)](https://github.com/vhzhen/notifco/actions/workflows/ci.yml)
+[![MIT](https://img.shields.io/badge/license-MIT-blue)](./LICENSE)
 
-**Status:** working and deployed. Running 24/7 against the live UW API on a free-tier
-VM, polling every 60 s. MIT licensed — [self-host it](#setup), it costs nothing to run.
+## Quickstart
 
-## Why
+**[→ Add notifco to your server](https://discord.com/oauth2/authorize?client_id=1558968102463471638&scope=bot+applications.commands&permissions=3072)**
 
-[UWFlow](https://github.com/UWFlow/uwflow) already has "notify me when a course frees
-up", but it rides on a nightly full-catalog importer: cron fires once a day, the sweep
-takes ~4 hours, so a student hears about an open seat **up to ~28 hours later**. A seat
-that opens and gets retaken within a day is often never reported at all.
-
-notifco targets **under 60 seconds**, and fixes a detection bug in UWFlow that silently
-drops one of the most valuable alerts (see [Correctness](#correctness)).
-
-Full analysis of UWFlow is in [NOTES.md](./NOTES.md); the design is in
-[DESIGN.md](./DESIGN.md); live API measurements are in [VERIFIED.md](./VERIFIED.md).
-
-## Architecture
+Then, in any channel:
 
 ```
-                         ┌─────────────────────────────────────────────┐
-                         │      UW Open Data API v3 (public only)      │
-                         │  Courses/{term}            1 req → 7.1 MB   │
-                         │  ClassSchedules/{term}      courseIds only   │
-                         │  ClassSchedules/{t}/{subj}/{cat}  enrollment │
-                         │  x-api-key · 120 req/min documented          │
-                         └────────────────────┬────────────────────────┘
-                                              │
-                      ┌───────────────────────▼────────────────────────┐
-                      │  source.CourseSource (interface)              │
-                      │   ├─ uwapi   real: token bucket + backoff     │
-                      │   └─ mock    captured fixtures (CI uses this) │
-                      └───────────────────────┬────────────────────────┘
-                                              │ []SectionState
-   ┌──────────────────────────────────────────▼───────────────────────────────────┐
-   │ POLLER                                                                        │
-   │  reload watched courses from Postgres every 30s                               │
-   │  priority queue (due time, then watcher count) → worker pool (4)              │
-   │  ONE request per COURSE covers every section of it                            │
-   │  adaptive interval: 60s → 32m while quiet, 15s for hot, ±10% jitter           │
-   └──────────────────────────────┬────────────────────────────────────────────────┘
-                                  │
-   ┌──────────────────────────────▼────────────────────────────────────────────────┐
-   │ DIFFER                                  ┌────────── Redis ──────────────┐    │
-   │  fires only on full → open              │ state:{term}:{class} → hash   │    │
-   │  compares old-vs-OLD capacity           │ epoch:{term}:{class} → counter│    │
-   │  Lua CAS: set state + INCR epoch,       └───────────────────────────────┘    │
-   │  atomically ⇒ concurrent pollers fire exactly once                            │
-   │  transition_id = "{term}:{class}:{epoch}:{unixMilli}"  ← collision-safe       │
-   └──────────────────────────────┬────────────────────────────────────────────────┘
-                                  │
-   ┌──────────────────────────────▼────────────────────────────────────────────────┐
-   │ NOTIFIER (transactional outbox)         ┌──────── Postgres ─────────────┐    │
-   │  fan-out: INSERT..SELECT ON CONFLICT    │ users · sections              │    │
-   │  claim:   FOR UPDATE SKIP LOCKED        │ subscriptions                 │    │
-   │  retry:   2s→10m exp + 20% jitter       │ notifications (outbox + log)  │    │
-   │  give up: dead_letter after 6 attempts  │  UNIQUE(sub_id, transition_id)│    │
-   │  reclaim stale leases on boot           └───────────────────────────────┘    │
-   └──────────────────────────────┬────────────────────────────────────────────────┘
-                                  │ send happens OUTSIDE the transaction
-   ┌──────────────────────────────▼────────────────────────────────────────────────┐
-   │ DISCORD (discordgo)                                                           │
-   │  /search · /watch · /unwatch · /watchlist          (ephemeral, autocompleted) │
-   │  deliver: DM ──(50007 DMs closed)──► channel ping that names no course        │
-   └──────────────────────────────┬────────────────────────────────────────────────┘
-                                  │
-                   Prometheus :9090/metrics  +  /healthz
+/search CS 341              see every section with live seat counts
+/watch CS 341 LEC 002       get DMed when that section frees up
+/watchlist                  what you're watching
+/unwatch CS 341             stop
 ```
 
-One binary, `notifco`, with roles `bot`, `poller`, `all`, `poll`, `migrate`. The free-tier
-deploy runs `all`.
+Three things to know:
 
-## Correctness
+- **Turn on DMs from server members**, or the alert can't reach you. Server settings → Privacy Settings. If DMs are closed, notifco falls back to mentioning you in the channel without naming the course.
+- **Alerts fire on full → open only.** Watching a section that already has seats stays quiet until it fills and frees again. That's the point: it tells you about *changes*.
+- **Seat counts are a best-effort snapshot.** Quest is authoritative — verify before you rely on it.
 
-The whole product is one predicate, so it is worth being precise about it.
+No account, no signup. Replies are private to you.
 
-```go
-func IsOpening(prev, cur Snapshot) bool {
-    wasFull := prev.Enrolled >= prev.Capacity   // old vs OLD capacity
-    nowOpen := cur.Enrolled  <  cur.Capacity
-    return wasFull && nowOpen
-}
+## Why it exists
+
+[UWFlow](https://github.com/UWFlow/uwflow) already has this feature, but it rides on a nightly importer: cron fires once a day and the sweep takes ~4 hours, so you hear about an open seat **up to ~28 hours later**. A seat that opens and gets retaken within a day often never gets reported.
+
+notifco targets **under 60 seconds**.
+
+It also fixes a bug in UWFlow's detection. UWFlow tests "was this section full?" by comparing the old enrollment count against the *new* capacity:
+
+```sql
+WHERE o.enrollment_total >= n.enrollment_capacity
 ```
 
-UWFlow's equivalent SQL tests `old.enrollment_total >= new.enrollment_capacity` — the old
-enrolled count against the **new** capacity. So when a department raises capacity on a
-full section (100/100 → 100/120, i.e. *twenty seats just appeared*), `100 >= 120` is false
-and **no notification fires**. notifco compares old-vs-old.
+So when a department **raises capacity** on a full section — 100/100 becomes 100/120, meaning twenty seats just appeared — `100 >= 120` is false and no alert fires. That's one of the most valuable alerts there is, silently dropped. notifco compares old-vs-old. There's [a test](./internal/differ/differ_test.go) asserting both that notifco fires and that UWFlow's predicate wouldn't.
 
-There is a test that asserts both halves of this: that notifco fires, and that UWFlow's
-predicate would not.
+## How it works
 
-Three further guarantees, each with a test:
+```
+UW Open Data API v3  ──poll only watched courses, adaptive 15–60s──┐
+                                                                   ▼
+                        differ: fires on full→open edge, Redis CAS (atomic)
+                                                                   │
+                        outbox: Postgres, SKIP LOCKED, retries, dead-letter
+                                                                   │
+                                                          DM ──► you
+```
 
-- **Edge-triggered.** A section that is merely still open never re-fires.
-- **Cold start never fires.** A fresh Redis must not alert 10k people that an
-  already-open section is open.
-- **Exactly once, across restarts.** `UNIQUE(subscription_id, transition_id)` means a
-  duplicate enqueue is impossible. Losing Redis degrades detection for one cycle but can
-  never cause a duplicate DM.
+One request returns **every section of a course**, so watching three sections of CS 341 costs one request, not three. Detection state lives in Redis; delivery is a Postgres outbox keyed `UNIQUE(subscription_id, transition_id)`, which makes it exactly-once across restarts and crashes.
 
-## Benchmarks
+Full design in [DESIGN.md](./DESIGN.md). The UWFlow teardown that informed it is in [NOTES.md](./NOTES.md). Live API measurements are in [VERIFIED.md](./VERIFIED.md).
 
-Measured on an M-series Mac, Postgres 16 and Redis 8 on localhost.
-Reproduce with `make load-test`.
+## Numbers
 
-### Fan-out: one section opens, 10,000 watchers
-
-| Stage | Time |
-|---|---|
-| Detect transition (Redis Lua CAS) | **114 µs** |
-| Fan out to 10,000 outbox rows (one `INSERT..SELECT`) | **90 ms** |
-| Drain all 10,000 (16 workers, instant transport) | **616 ms** |
-| Throughput | **16,231 msg/sec** |
-| Latency p50 / p95 / p99 / max | **395 ms / 681 ms / 702 ms / 707 ms** |
-| **Duplicates** | **0** |
-| **Lost** | **0** |
-
-### With Discord's real rate ceiling
-
-The numbers above isolate notifco. In production Discord dominates: its global budget is
-roughly 50 req/s. Modelling that at 20 ms/message:
+Measured, not estimated. Reproduce with `make load-test`.
 
 | | |
 |---|---|
-| 1,000 subscribers | **2.77 s** (361 msg/sec, p99 2.75 s) |
-| 10,000 extrapolated | **~28 s** |
+| 10,000 watchers on one opening | 616 ms to drain, **0 duplicates, 0 lost** |
+| Throughput | 16,231 msg/sec |
+| Detect a transition | 114 µs |
+| With Discord's real ~50 req/s ceiling | ~28 s for 10k DMs |
+| Tests | 65, all green under `-race` |
+| Running footprint | ~48 MB total (bot + Postgres + Redis) |
 
-So for a realistically popular section, end-to-end is **poll interval + a few seconds**.
-For a pathological 10k-watcher section, Discord's ceiling adds ~30s — a platform limit,
-not a pipeline one.
+Detection lag is bounded by the poll interval. End-to-end is **poll interval + a couple of seconds**; the upstream API exposes no "last updated" field, so the true seat-open instant is unknowable and notifco doesn't pretend otherwise.
 
-### Upstream API, measured live
+## Self-hosting
 
-| | |
-|---|---|
-| `Courses/{term}` | 7,894 offerings, 7.1 MB, **one request, 0.60 s** |
-| `ClassSchedules/{term}/CS/341` | 7 sections with enrollment, 0.77 s |
-| `ClassSchedules/{term}` | **courseIds only — no enrollment** |
-| Courses with classes in term 1269 | 2,179 of 7,295 |
-| Full-term enrollment sweep | 2,179 requests ≈ 18 min at 120 req/min |
-| **60 s interval supports** | **~120 distinct watched courses** |
-| Rate limit | 120/min documented; **150 requests in 22 s (~409/min) with zero 429s** |
+MIT licensed and free to run. Two $0 paths:
 
-Default pacing stays at the documented 120/min. The docs call the limit experimental and
-return no rate-limit headers, so the observed headroom is treated as safety margin.
+- **[Google Cloud](./deploy/gcp/README.md)** — always-free `e2-micro`. This is the one actually deployed and verified end to end.
+- **[Oracle Cloud](./deploy/oracle/README.md)** — always-free ARM VM, far more RAM.
 
-### Verification
-
-```
-$ gofmt -s -l .          (clean)
-$ go vet ./...           (clean)
-$ go mod verify          all modules verified
-$ go build ./...         OK
-$ go test -race ./...
-ok  internal/config          1.550s
-ok  internal/differ          1.416s
-ok  internal/notifier        1.745s
-ok  internal/poller          2.319s
-ok  internal/source          1.221s
-ok  internal/source/mock     2.122s
-ok  test/integration         2.776s
-```
-
-65 tests, all passing under `-race`.
-
-Live end-to-end against the real API:
-
-```
-$ notifco poll            # NOTIFCO_SOURCE=uwapi
-level=INFO msg="notifco starting" role=poll term=1269 config="source=uwapi key=set ..."
-level=INFO msg="one-shot poll complete" delivered=0
-
- course_code | section_name |  seats  | is_online
--------------+--------------+---------+-----------
- cs341       | LAB 101      | 99/100  | f
- cs341       | LEC 002      | 99/100  | f
- cs341       | TST 201      | 268/300 | f
- ... (7 sections from ONE request)
-```
-
-### Audit
-
-The first working version was put through an independent audit that was told not
-to trust this README. It found eight real defects, each reproduced against live
-Postgres and Redis. All are fixed, and each has a regression test in
-[test/integration/regression_test.go](./test/integration/regression_test.go) that
-fails without the fix. The notable ones:
-
-| Severity | Defect | Fix |
-|---|---|---|
-| **Critical** | `transition_id` was `{term}:{class}:{epoch}` with the epoch from a Redis `INCR`. A Redis flush — which docker-compose explicitly permitted — restarted the epoch at 1, regenerating an ID Postgres had already recorded, so `ON CONFLICT DO NOTHING` **silently discarded a real seat opening**. | ID now embeds the detection time, making it collision-free across state loss; Redis also persists now. |
-| **Critical** | The epoch key's TTL was refreshed only when a transition fired, while the state key refreshed every observation. The two diverged, so a long-quiet section lost its epoch but kept its state — triggering the same collision with no outage at all. | Both TTLs refresh in lockstep inside the Lua script. |
-| **High** | `Claim` did `attempts+1` and `RetryWithoutAttempt` did `attempts-1`, netting zero, so a throttled notification retried **forever** and the `MaxAttempts` check was unreachable. | Separate `throttles` counter, capped. |
-| **High** | `ReclaimStale` ran only at boot and `Claim` only selects `pending`, so a worker killed mid-send stranded a row in `sending` **forever**. | Reclaim also runs every 30s while live. |
-| **High** | Data race on `job.tier` / `job.watchers` between the poller's refresh and its workers, proven with `-race`. | All reads moved under the mutex. |
-| Medium | A `0/0` previous snapshot satisfied "was full", so a section *appearing* fired a spurious alert. | Both snapshots must have positive capacity. |
-| Medium | Durations were passed to Postgres as Go strings (`"500µs"`), which `::interval` rejects. | `make_interval(secs => ...)`. |
-| Medium | No guard against Discord's 2,000-character limit, so `/watchlist` broke permanently for heavy users. | Output clamped and capped. |
-| Low | `FindSection` sliced the last three bytes of a section name unguarded — a panic reachable from slash input, and discordgo has no recover. | Numeric suffix parsed safely; panic recovery added to the command handler. |
-| Low | A bare `%` in search matched every course. | LIKE metacharacters escaped; empty prefix no longer matches all. |
-
-The auditor's verdict on the parts it tried hardest to break and could not:
-concurrent exactly-once firing holds (64 goroutines → one transition), cold-start
-suppression is correct, there is no SQL injection anywhere (every query uses
-placeholders), the API key cannot leak into logs or errors, `.env` is absent from
-all of git history, and the rate limiter and backoff are correct.
-
-Worth stating plainly: the test suite was green **before** the audit too. A green
-suite proves tests and failure modes don't intersect, not that the code is right.
-
-## Setup
-
-### Prerequisites
-
-- Go 1.26+, or just Docker
-- Postgres 16 and Redis 7+ (docker-compose provides both)
-- A Discord bot token
-- Optionally a UW Open Data API key — **without one it runs on fixtures**
-
-### Quickest path
+Locally:
 
 ```sh
-git clone https://github.com/vhzhen/notifco.git
-cd notifco
-cp .env.sample .env
-# fill in DISCORD_TOKEN and DISCORD_APP_ID
+git clone https://github.com/vhzhen/notifco.git && cd notifco
+cp .env.sample .env      # add DISCORD_TOKEN and DISCORD_APP_ID
 docker compose up -d
-docker compose logs -f notifco
 ```
 
-> **On a host with ~1 GB of RAM, do not build in place.** The Go compiler needs more
-> memory than that, and it will thrash swap rather than finish. Cross-compile instead —
-> it takes about 8 seconds:
->
-> ```sh
-> make dist-linux        # -> dist/notifco-linux-amd64, static, ~17 MB
-> # copy the binary to the host's checkout, then:
-> docker compose -f docker-compose.yml -f docker-compose.prebuilt.yml up -d
-> ```
->
-> Full walkthrough in [deploy/gcp/README.md](./deploy/gcp/README.md).
-
-### Local development
+Leave `UW_API_KEY` empty and it runs on captured API fixtures — that's how CI works, with no secrets. For live data, [register a key](https://openapi.data.uwaterloo.ca/api-docs/) (returned instantly, no email confirmation) and set `NOTIFCO_SOURCE=uwapi`.
 
 ```sh
-make dev-infra     # Postgres + Redis only
-make migrate
-make run           # runs `notifco all`
+make help          # all targets
 make verify        # lint + build + race tests
 make load-test     # the 10k benchmark
-make help          # all targets
 ```
 
-### Discord bot token
-
-1. <https://discord.com/developers/applications> → **New Application**
-2. **Bot** → **Reset Token** → copy into `DISCORD_TOKEN`
-3. **General Information** → copy Application ID into `DISCORD_APP_ID`
-4. **Installation** → invite with the `applications.commands` scope, plus
-   **Send Messages** in whichever channel you want fallback pings in
-5. While developing, set `DISCORD_GUILD_ID` so commands register instantly instead of
-   taking up to an hour to propagate globally
-
-notifco needs **no privileged intents** — no message content, no member list. It reads
-nothing from chat.
-
-### UW API key (optional)
-
-The key is returned immediately in the response body; there is no email-confirmation step
-despite what older docs suggest.
+**On a host with ~1 GB RAM, don't build in place** — the Go compiler thrashes swap instead of finishing. Cross-compile instead (~8 s):
 
 ```sh
-curl --request POST \
-  --url https://openapi.data.uwaterloo.ca/v3/account/register \
-  --header 'content-type: application/x-www-form-urlencoded' \
-  --data 'email=YOU@example.com&project=notifco&uri=https%3A%2F%2Fgithub.com%2Fvhzhen%2Fnotifco'
+make dist-linux    # then copy dist/notifco-linux-amd64 to the host
+docker compose -f docker-compose.yml -f docker-compose.prebuilt.yml up -d
 ```
 
-Put it in `UW_API_KEY` and set `NOTIFCO_SOURCE=uwapi`. Leave it empty and notifco uses the
-mock source backed by real captured responses in `internal/source/mock/testdata` — which
-is exactly how CI runs, with no secrets.
+Cloudflare and CloudFront can't host this: a Discord gateway bot holds a long-lived outbound WebSocket, so it needs a process that stays running, not a CDN or per-request serverless.
 
-## Commands
+## Limits
 
-| Command | What it does |
-|---|---|
-| `/search <code>` | Section list with live seat counts. Fetches on demand if nobody has watched the course before. |
-| `/watch <code> [section]` | Watch one section, or every section of the course if `section` is omitted. Autocompleted. |
-| `/unwatch <code> [section]` | Stop watching one section, or the whole course. Also cancels any undelivered alert. |
-| `/watchlist` | Your active watches with current seat counts. |
+- **~120 distinct watched courses** at a 60 s interval. There's no bulk enrollment endpoint, so cost scales with distinct watched courses. Raise `NOTIFCO_RATE_LIMIT` or widen the interval to go further.
+- **No waitlist awareness.** The API exposes no waitlist or reserved-capacity field, so a section can report seats you personally can't take.
+- **Single poller.** The differ and notifier are safe to run concurrently; the poller would need a distributed lock.
+- Discord's rate limit dominates very large fan-outs. Nothing notifco can do about that.
 
-Codes are forgiving: `CS 341`, `cs341`, `CS-341` all work, and sections accept `LEC 001`,
-`001`, or `1`. All replies are ephemeral.
+## Data and privacy
+
+Reads exactly one upstream: the public [UW Open Data API v3](https://openapi.data.uwaterloo.ca/api-docs/), whose stated scope is publicly visible data only.
+
+**Nothing behind a login is touched** — no Quest scraping, no credentials, no SourceAPI. The only thing stored about you is your Discord user ID and the sections you chose to watch. `/unwatch` removes the subscription and cancels any undelivered alert.
+
+UWFlow is MIT licensed and was read as a reference only; no code, SQL, or templates were copied.
 
 ## Configuration
 
-Everything is environment variables; see [.env.sample](./.env.sample).
+Environment variables only — see [.env.sample](./.env.sample) for the full list with comments. The ones you'll actually touch:
 
-| Variable | Default | Notes |
+| Variable | Default | |
 |---|---|---|
-| `DISCORD_TOKEN` | — | required for `bot`/`all` |
-| `DISCORD_APP_ID` | — | required for `bot`/`all` |
+| `DISCORD_TOKEN` | — | required |
+| `DISCORD_APP_ID` | — | required |
 | `DISCORD_GUILD_ID` | — | set for instant command registration while developing |
-| `UW_API_KEY` | — | empty ⇒ mock source |
-| `NOTIFCO_SOURCE` | auto | `uwapi` or `mock`; inferred from the key |
-| `DATABASE_URL` | localhost | Postgres DSN |
-| `REDIS_URL` | localhost | Redis DSN |
-| `NOTIFCO_DB_MAX_CONNS` | `16` | Postgres pool size; lower to ~6 on a 1 GB VM |
-| `NOTIFCO_POLL_INTERVAL` | `60s` | base interval; bounds detection lag |
-| `NOTIFCO_HOT_INTERVAL` | `15s` | for courses with a full watched section |
-| `NOTIFCO_RATE_LIMIT` | `120` | req/min ceiling |
+| `UW_API_KEY` | — | empty ⇒ fixtures instead of live data |
+| `NOTIFCO_POLL_INTERVAL` | `60s` | bounds detection lag |
+| `NOTIFCO_RATE_LIMIT` | `120` | upstream req/min ceiling |
 | `NOTIFCO_COOLDOWN` | `30m` | suppresses repeat alerts on a flapping section |
-| `NOTIFCO_MAX_ATTEMPTS` | `6` | then dead-letter |
-| `METRICS_ADDR` | `:9090` | `/metrics` and `/healthz` |
 
-## Metrics
-
-`notifco_polls_total`, `notifco_alert_latency_seconds`, `notifco_active_users`,
-`notifco_active_subscriptions`, plus `notifco_api_requests_total`,
-`notifco_rate_limit_wait_seconds`, `notifco_transitions_total`,
-`notifco_notifications_total`, `notifco_queue_depth`, `notifco_poll_cycle_seconds`.
-
-**On alert latency, honestly:** the upstream API exposes no "last updated" field on a
-class, so the instant a seat actually opened is **unknowable**.
-`notifco_alert_latency_seconds` measures **detected → sent**, which is the part notifco
-controls. Detection lag is *bounded* by the poll interval and reported separately as
-`notifco_poll_interval_seconds`. The honest end-to-end figure is
-`poll interval + alert latency`, and nobody can do better than that against this API.
-
-`/metrics` is unauthenticated and bound to localhost in docker-compose. Do not expose it.
-
-## Deployment
-
-Two $0 paths, both walked end to end:
-
-- **[deploy/gcp/README.md](./deploy/gcp/README.md)** — Google Cloud always-free
-  `e2-micro`. **This is the one that has actually been deployed and verified.** Covers
-  the three things that silently cost money (region, disk type, the hour-based VM
-  allowance), the swap step 1 GB requires, the read-only deploy key for a private repo,
-  the systemd unit and backup timer, and the hard-reset gotcha that silently masks the
-  unit. Use `docker-compose.gcp.yml` + `docker-compose.prebuilt.yml` alongside the base
-  file.
-- **[deploy/oracle/README.md](./deploy/oracle/README.md)** — Oracle Cloud Always Free
-  ARM VM. Far more RAM (12 GB, so it can build in place), but has an iptables gotcha and
-  Oracle reclaims idle instances.
-
-Measured on the live `e2-micro` deployment:
-
-| Container | Using | Limit |
-|---|---|---|
-| notifco | 20 MB | 180 MB |
-| postgres | 22 MB | 256 MB |
-| redis | 6 MB | 80 MB |
-
-~48 MB total against a 516 MB budget, ~530 MB host memory still available, swap
-essentially untouched. The 1 GB ceiling only bites while *compiling*, which is why the
-prebuilt path exists.
-
-Free-tier traps worth knowing whichever host you pick: Render's free tier spins down when
-idle, which is fatal for a poller, and Neon's free Postgres allows 100 compute-hours a
-month with scale-to-zero — an always-on bot never idles and runs dry mid-month. Cloudflare
-and CloudFront cannot host this at all: a Discord gateway bot holds a long-lived outbound
-WebSocket, so it needs a process that simply stays running, not a CDN or a per-request
-serverless runtime.
-
-## How notifco differs from UWFlow
-
-| | UWFlow | notifco |
-|---|---|---|
-| Cadence | daily cron, ~4 h sweep | continuous, 60 s |
-| Scope | 4 terms × every course | only watched courses |
-| Worst-case alert lag | ~28 h | ~60 s + seconds |
-| "Was full" test | old vs **new** capacity (buggy) | old vs **old** capacity |
-| Last-seen state | the serving table itself | Redis, decoupled |
-| Detection | welded to the importer's `UPDATE` | standalone, pollable at any rate |
-| Delivery retry | **none** — logged and skipped | exp backoff + jitter, dead-letter |
-| Idempotency | `seen_at` flag | `UNIQUE(sub_id, transition_id)` |
-| Send location | **inside** the DB transaction | outside it |
-| Backlog on restart | never drained | reclaimed on boot |
-| Re-notify control | none | cooldown + optional notify-once |
-| Fan-out | serial, one SMTP dial each | pooled workers, 17k/sec |
-
-Credit where due: UWFlow's staging-table bulk merge and its statement-level trigger are
-genuinely elegant, and its `LISTEN/NOTIFY` doorbell is a good idea that notifco keeps in
-spirit (an in-process wake-up) while using a real outbox as the source of truth.
-
-## Data sources and scope
-
-Reads exactly one upstream: the public, self-serve
-[UW Open Data API v3](https://openapi.data.uwaterloo.ca/api-docs/), whose stated scope is
-publicly visible data only.
-
-**Nothing behind a login is touched.** No Quest scraping, no SourceAPI, no student
-credentials, no Shibboleth. The only user data stored is a Discord user ID and the
-sections someone chose to watch. Seat figures are best-effort and may be stale — every
-seat count notifco shows carries that disclaimer, because the UW OpenData project asks
-integrators to surface it. **Quest is authoritative.**
-
-UWFlow is MIT licensed and was read as a reference only. No code, SQL, or templates were
-copied; this is an independent implementation. See [NOTES.md §7](./NOTES.md).
-
-## Limitations
-
-- **~120 distinct watched courses at a 60 s interval.** There is no bulk enrollment
-  endpoint, so cost scales with distinct watched courses. Raise `NOTIFCO_RATE_LIMIT`
-  toward the observed ~409/min, or widen the interval.
-- **No waitlist awareness.** Upstream exposes no waitlist or reserved-capacity field, so
-  a section can report seats a given student cannot actually take.
-- **Single poller.** The differ and notifier are safe to run concurrently; the poller is
-  not, and would need a distributed lock to scale horizontally.
-- **429 handling is untested against reality.** I never managed to trigger one, so
-  whether upstream sends `Retry-After` is unconfirmed. Both paths are implemented.
-- **Discord's rate limit dominates large fan-out.** Nothing notifco can do about that.
-
-## Project layout
-
-```
-cmd/notifco/            entrypoint: bot | poller | all | poll | migrate
-internal/
-  config/               env parsing, role-aware validation
-  source/               CourseSource interface + helpers
-    uwapi/              real client: token bucket, backoff, upstream quirks
-    mock/               fixtures + scriptable timeline, with testdata/
-  poller/               scheduler, priority queue, worker pool, adaptive interval
-  differ/               transition rule + Redis Lua CAS
-  notifier/             outbox worker, retries, dead-letter
-  discord/              slash commands + delivery transport
-  store/                Postgres queries, outbox, embedded migrations/
-  metrics/              Prometheus collectors
-test/integration/       end-to-end on mock source, real PG + Redis
-test/load/              10k-subscription benchmark (build tag `load`)
-deploy/gcp/             $0 Google Cloud guide (deployed and verified)
-deploy/oracle/          $0 Oracle Cloud guide
-Dockerfile              builds from source (needs >1 GB RAM)
-Dockerfile.prebuilt     runtime-only; use with `make dist-linux`
-docker-compose.yml      base stack
-docker-compose.gcp.yml  memory limits tuned for a 1 GB e2-micro
-docker-compose.prebuilt.yml  use a cross-compiled binary
-```
+Prometheus metrics and `/healthz` on `:9090`. `/metrics` is unauthenticated by design — keep it on localhost.
 
 ## License
 

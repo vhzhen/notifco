@@ -210,3 +210,70 @@ Unchanged and still correct: the differ's full→open rule and the capacity-incr
 fix (NOTES.md §3), Redis last-seen state, the Postgres outbox with retries and
 dead-lettering, the `(subscription_id, transition_id)` idempotency key, grouping one
 request per course, and the adaptive interval.
+
+---
+
+## 9. Independent audit of the implementation
+
+After the first working version, the code was put through an independent audit
+explicitly told **not** to trust the README. It found eight real defects, each
+reproduced against live Postgres and Redis. All are fixed, and each has a
+regression test in
+[`test/integration/regression_test.go`](./test/integration/regression_test.go)
+that fails without the fix.
+
+| Severity | Defect | Fix |
+|---|---|---|
+| **Critical** | `transition_id` was `{term}:{class}:{epoch}` with the epoch from a Redis `INCR`, while the permanent dedup key is a Postgres unique constraint. Any loss of the Redis counter restarted it at 1, regenerating an ID already recorded, so `ON CONFLICT DO NOTHING` **silently discarded a real seat opening**. | ID now embeds the detection timestamp, collision-free across state loss; Redis also persists. |
+| **Critical** | The epoch key's TTL was refreshed only when a transition fired, while state refreshed every observation. The two diverged, so a long-quiet section lost its epoch but kept its state — same collision, with no outage at all. | Both TTLs refresh in lockstep inside the Lua script. |
+| **High** | `Claim` did `attempts+1` and `RetryWithoutAttempt` did `attempts-1`, netting zero, so a throttled notification retried **forever** and the `MaxAttempts` check was unreachable. | Separate `throttles` counter, capped at 20. |
+| **High** | `ReclaimStale` ran only at boot and `Claim` only selects `pending`, so a worker killed mid-send stranded its row in `sending` **forever**. The original test passed only because it called `ReclaimStale` by hand. | Reclaim also runs every 30 s while live. |
+| **High** | Data race on `job.tier` / `job.watchers` between the poller's refresh and its workers, proven under `-race`. Missed because the poller tests never started `Run`. | All reads moved under the mutex; workers snapshot `tier` once. |
+| Medium | A `0/0` previous snapshot satisfied "was full", so a section *appearing* fired a spurious alert. | Both snapshots must have positive capacity. |
+| Medium | Durations were passed to Postgres as Go strings (`"500µs"`), which `::interval` rejects. | `make_interval(secs => ...)`. |
+| Medium | No guard against Discord's 2,000-character limit, so `/watchlist` broke permanently for heavy users. | Output clamped on a line boundary and capped. |
+| Low | `FindSection` sliced the last three bytes of a section name unguarded — a panic reachable from slash input, and discordgo has no recover. | Numeric suffix parsed safely; panic recovery added to the handler. |
+| Low | A bare `%` in search matched every course. | LIKE metacharacters escaped; empty prefix no longer matches all. |
+
+What the audit tried hardest to break and could not: concurrent exactly-once
+firing holds (64 goroutines produced one transition), cold-start suppression is
+correct, there is no SQL injection anywhere (every query uses placeholders), the
+API key cannot leak into logs or errors, `.env` is absent from all of git
+history, and the rate limiter and backoff are correct.
+
+Worth stating plainly: **the test suite was green before the audit too.** A green
+suite proves that the tests and the failure modes don't intersect, not that the
+code is right.
+
+## 10. Deployment, verified on real hardware
+
+Deployed to a Google Cloud always-free `e2-micro` (1 GB RAM, `us-central1`,
+30 GB `pd-standard`) on 2026-10-11. Three findings worth recording:
+
+1. **The Go compiler will not finish inside 1 GB.** The in-place Docker build sat
+   at 83–93% iowait with the compiler holding ~395 MB RSS against 83 MB free,
+   drove 626 MB into swap, had not completed after 10 minutes, and took the
+   machine unreachable over SSH. Cross-compiling the same binary locally takes
+   ~8 s and yields a 17 MB static executable. Hence `Dockerfile.prebuilt`.
+2. **`gcloud compute instances reset` is a power cycle, not a reboot.** Running it
+   moments after writing `/etc/systemd/system/*.service` truncated those files to
+   0 bytes, and systemd reports a zero-length unit as **masked** — so autostart
+   would silently never have run. It looked fine because Docker's
+   `restart: unless-stopped` brought the containers back anyway.
+3. **Ubuntu 26.04's minimal image has no `crontab`.** Backups use a systemd timer.
+
+Measured footprint once running:
+
+| Container | Using | Limit |
+|---|---|---|
+| notifco | 20 MB | 180 MB |
+| postgres | 22 MB | 256 MB |
+| redis | 6 MB | 80 MB |
+
+~48 MB total against a 516 MB budget, ~530 MB host memory still available, swap
+essentially untouched. The 1 GB ceiling only bites while compiling.
+
+Verified after a graceful reboot: `notifco.service` journal shows
+`Starting` → `Finished`, all three containers healthy, Discord gateway
+reconnected with four commands registered, 7,891 courses loaded from the live
+API, and the nightly backup timer scheduled.
