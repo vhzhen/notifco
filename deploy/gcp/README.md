@@ -246,7 +246,21 @@ EOF
 
 sudo systemctl daemon-reload
 sudo systemctl enable --now notifco
+sudo sync        # see the warning below
 ```
+
+> **Run `sudo sync` after writing unit files, and reboot with
+> `sudo systemctl reboot` — never `gcloud compute instances reset`.**
+> `reset` is a hard power cycle. Doing it moments after writing
+> `/etc/systemd/system/*.service` truncated those files to 0 bytes, and systemd
+> reports a zero-length unit as **masked**, so it silently never starts. The
+> containers still came back (Docker's `restart: unless-stopped`), which made
+> the breakage easy to miss. Verify with:
+>
+> ```sh
+> systemctl is-enabled notifco        # want: enabled, not masked
+> stat -c%s /etc/systemd/system/notifco.service   # want: non-zero
+> ```
 
 ## 8. Guard against surprise bills
 
@@ -324,6 +338,7 @@ gunzip -c ~/backups/notifco-YYYY-MM-DD.sql.gz \
 | Slash commands missing | Global registration takes up to an hour. Set `DISCORD_GUILD_ID` for instant. |
 | `crontab: command not found` | Minimal Ubuntu 26.04 has no cron. Use the systemd timer in step 9. |
 | `could not read Username for 'https://github.com'` | Private repo over HTTPS. Add the read-only deploy key from step 5. |
+| `systemctl is-enabled notifco` says `masked` | A zero-length unit file, usually from a hard `instances reset` before the write flushed. Recreate it, then `sudo sync`. |
 | Bot online, no alerts ever | Expected. Alerts fire only on a **full → open** edge. An already-open section never notifies until it fills and frees again. |
 | 401 from the UW API | Key wrong or revoked. Re-register (see the main README). |
 | Unexpected charge | Almost always disk type (**Balanced** instead of **Standard**) or a non-free region. Check **Billing → Reports**, group by SKU. |
