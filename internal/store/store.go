@@ -4,6 +4,7 @@ package store
 import (
 	"context"
 	"embed"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"sort"
@@ -151,8 +152,8 @@ func (s *Store) UpsertSections(ctx context.Context, states []source.SectionState
 	batch := &pgx.Batch{}
 	const q = `
 INSERT INTO sections (term_code, class_number, course_code, course_title,
-                      section_name, component, capacity, enrolled, is_online, observed_at)
-VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10)
+                      section_name, component, capacity, enrolled, is_online, observed_at, meetings)
+VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11::jsonb)
 ON CONFLICT (term_code, class_number) DO UPDATE SET
   course_code  = EXCLUDED.course_code,
   course_title = CASE WHEN EXCLUDED.course_title <> '' THEN EXCLUDED.course_title
@@ -162,15 +163,24 @@ ON CONFLICT (term_code, class_number) DO UPDATE SET
   capacity     = EXCLUDED.capacity,
   enrolled     = EXCLUDED.enrolled,
   is_online    = EXCLUDED.is_online,
-  observed_at  = EXCLUDED.observed_at`
+  observed_at  = EXCLUDED.observed_at,
+  meetings     = EXCLUDED.meetings`
 
 	for _, st := range states {
 		observed := st.ObservedAt
 		if observed.IsZero() {
 			observed = time.Now().UTC()
 		}
+		meetings := st.Meetings
+		if meetings == nil {
+			meetings = []source.Meeting{} // marshal as [], never null
+		}
+		mj, err := json.Marshal(meetings)
+		if err != nil {
+			return fmt.Errorf("store: marshal meetings for class %d: %w", st.ClassNumber, err)
+		}
 		batch.Queue(q, st.TermCode, st.ClassNumber, st.CourseCode, st.CourseTitle,
-			st.SectionName, st.Component, st.Capacity, st.Enrolled, st.IsOnline, observed)
+			st.SectionName, st.Component, st.Capacity, st.Enrolled, st.IsOnline, observed, string(mj))
 	}
 
 	res := s.pool.SendBatch(ctx, batch)
@@ -216,7 +226,9 @@ type Section struct {
 	Capacity    int
 	Enrolled    int
 	IsOnline    bool
-	ObservedAt  time.Time
+	// Meetings are the weekly slots; empty means online or TBA.
+	Meetings   []source.Meeting
+	ObservedAt time.Time
 }
 
 // SeatsOpen returns free seats, never negative.
@@ -228,17 +240,25 @@ func (s Section) SeatsOpen() int {
 }
 
 const sectionCols = `id, term_code, class_number, course_code, course_title,
-                     section_name, component, capacity, enrolled, is_online, observed_at`
+                     section_name, component, capacity, enrolled, is_online, observed_at, meetings`
 
 func scanSections(rows pgx.Rows) ([]Section, error) {
 	defer rows.Close()
 	var out []Section
 	for rows.Next() {
 		var s Section
+		var rawMeetings []byte
 		if err := rows.Scan(&s.ID, &s.TermCode, &s.ClassNumber, &s.CourseCode,
 			&s.CourseTitle, &s.SectionName, &s.Component, &s.Capacity,
-			&s.Enrolled, &s.IsOnline, &s.ObservedAt); err != nil {
+			&s.Enrolled, &s.IsOnline, &s.ObservedAt, &rawMeetings); err != nil {
 			return nil, err
+		}
+		// A malformed value must not take the whole listing down: the section
+		// is still useful without its times, and shows as TBA.
+		if len(rawMeetings) > 0 {
+			if err := json.Unmarshal(rawMeetings, &s.Meetings); err != nil {
+				s.Meetings = nil
+			}
 		}
 		out = append(out, s)
 	}

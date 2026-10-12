@@ -224,9 +224,13 @@ func TestPaginationCoversEverySectionExactlyOnce(t *testing.T) {
 		}
 		total := len(paginateRows(sectionRows(sections), pageSize))
 		pages = total
-		for _, s := range sections {
-			if strings.Contains(v.embed.Description, "`"+s.SectionName+"`") {
-				seen[s.SectionName]++
+		// Table rows begin with the section name, padded. Count lines that do,
+		// so a name appearing in prose or a continuation line cannot be double counted.
+		for _, line := range strings.Split(stripANSI(v.embed.Description), "\n") {
+			for _, s := range sections {
+				if strings.HasPrefix(line, s.SectionName+" ") {
+					seen[s.SectionName]++
+				}
 			}
 		}
 		if p >= total-1 {
@@ -337,7 +341,7 @@ func TestHeadingRepeatedAtTopOfPage(t *testing.T) {
 
 func TestGroupHeadingsAppearOncePerGroupOnAPage(t *testing.T) {
 	rows := []pageRow{
-		{"Lectures", "a"}, {"Lectures", "b"}, {"Tutorials", "c"}, {"Labs", "d"}, {"Labs", "e"},
+		{group: "Lectures", text: "a"}, {group: "Lectures", text: "b"}, {group: "Tutorials", text: "c"}, {group: "Labs", text: "d"}, {group: "Labs", text: "e"},
 	}
 	desc, _, _ := renderPage(rows, 0, 8)
 	for _, h := range []string{"**Lectures**", "**Tutorials**", "**Labs**"} {

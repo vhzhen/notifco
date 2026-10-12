@@ -39,7 +39,10 @@ type SectionState struct {
 	Capacity    int    // maxEnrollmentCapacity
 	Enrolled    int    // enrolledStudents
 	IsOnline    bool
-	ObservedAt  time.Time // set by us; the upstream exposes no timestamp
+	// Meetings are the section's weekly slots, normalised (see
+	// NormalizeMeetings). Empty means no scheduled time: online or TBA.
+	Meetings   []Meeting
+	ObservedAt time.Time // set by us; the upstream exposes no timestamp
 }
 
 // IsFull reports whether the section has no free seats.

@@ -19,14 +19,19 @@ Then, in any channel:
 /unwatch MATH 135           stop
 ```
 
-Results are laid out like this, with **Previous / Next** buttons when a course has more sections than fit on one page (MATH 135 has 25):
+Results are a table, with **Previous / Next** buttons when a course has more than 20 sections (MATH 135 has 25). The days a section meets are in bold:
 
-> **MATH 135 - Algebra for Honours Mathematics [Fall 2026]**
-> 25 sections · 23 open · 2 full
->
-> **Lectures**
-> `LEC 002` ▰▰▰▰▰▰▰▱ `109/120` · **11 seats open**
-> `LEC 001` ▰▰▰▰▰▰▰▰ `120/120` · Full
+```
+MATH 135 - Algebra for Honours Mathematics [Fall 2026]
+
+Section Class Enrolled  Time                 Date
+────────────────────────────────────────────────────────────
+LEC 001 5986    90/120   8:30 AM -  9:20 AM  M T W Th F S Su
+LEC 002 6254   109/120   9:30 AM - 10:20 AM  M T W Th F S Su
+TUT 101 6695   417/440   4:00 PM -  5:20 PM  M T W Th F S Su
+```
+
+The bold days don't show in plain text, so here that row is `M T W Th F S Su` with M, W and F bold. Bold inside an aligned table needs Discord's ANSI formatting, which the desktop and web apps render. The mobile apps are reported to show it as plain text, where the table still lines up but the meeting days aren't highlighted.
 
 Three things to know:
 

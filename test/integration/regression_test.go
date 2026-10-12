@@ -420,3 +420,124 @@ func TestEnsureCoursePersistsCatalogTitle(t *testing.T) {
 		t.Errorf("the poll's enrolment update was lost: %d", got[0].Enrolled)
 	}
 }
+
+// TestMeetingsRoundTripThroughPostgres: times and days must come back out of
+// the database exactly as they went in, and a later poll must be able to change
+// them (UW reschedules sections).
+func TestMeetingsRoundTripThroughPostgres(t *testing.T) {
+	h := newHarness(t)
+	ctx := context.Background()
+
+	in := []source.Meeting{
+		{Days: "YNNYNNN", Start: "09:30", End: "10:20"},
+		{Days: "NYNNNNN", Start: "13:30", End: "14:20"},
+	}
+	st := source.SectionState{
+		TermCode: "1269", ClassNumber: 7401, CourseCode: "cs401", SectionName: "LEC 001",
+		Component: "LEC", Capacity: 100, Enrolled: 10, Meetings: in, ObservedAt: time.Now().UTC(),
+	}
+	if err := h.store.UpsertSections(ctx, []source.SectionState{st}); err != nil {
+		t.Fatal(err)
+	}
+	got, err := h.store.SectionsByCourse(ctx, "1269", "cs401")
+	if err != nil || len(got) != 1 {
+		t.Fatalf("SectionsByCourse: %v, %d rows", err, len(got))
+	}
+	if len(got[0].Meetings) != 2 || got[0].Meetings[0] != in[0] || got[0].Meetings[1] != in[1] {
+		t.Fatalf("meetings came back as %+v, want %+v", got[0].Meetings, in)
+	}
+
+	// Rescheduled: the next poll overwrites.
+	st.Meetings = []source.Meeting{{Days: "NNYNNNN", Start: "08:30", End: "09:20"}}
+	if err := h.store.UpsertSections(ctx, []source.SectionState{st}); err != nil {
+		t.Fatal(err)
+	}
+	got, _ = h.store.SectionsByCourse(ctx, "1269", "cs401")
+	if len(got[0].Meetings) != 1 || got[0].Meetings[0].Start != "08:30" {
+		t.Fatalf("reschedule not applied: %+v", got[0].Meetings)
+	}
+
+	// A section that loses its time (back to TBA) must end up with none, not
+	// keep showing the stale slot.
+	st.Meetings = nil
+	if err := h.store.UpsertSections(ctx, []source.SectionState{st}); err != nil {
+		t.Fatal(err)
+	}
+	got, _ = h.store.SectionsByCourse(ctx, "1269", "cs401")
+	if len(got[0].Meetings) != 0 {
+		t.Fatalf("a TBA section kept a stale slot: %+v", got[0].Meetings)
+	}
+}
+
+// TestMalformedStoredMeetingsDoNotBreakTheListing: the column is JSONB, so
+// anything valid JSON can be in it. A bad value must degrade one section to
+// "no time", not fail the whole /search.
+func TestMalformedStoredMeetingsDoNotBreakTheListing(t *testing.T) {
+	h := newHarness(t)
+	ctx := context.Background()
+
+	good := source.SectionState{TermCode: "1269", ClassNumber: 7402, CourseCode: "cs402", SectionName: "LEC 001",
+		Component: "LEC", Capacity: 10, Enrolled: 1, ObservedAt: time.Now().UTC(),
+		Meetings: []source.Meeting{{Days: "YNNNNNN", Start: "09:00", End: "09:50"}}}
+	bad := good
+	bad.ClassNumber, bad.SectionName = 7403, "LEC 002"
+	if err := h.store.UpsertSections(ctx, []source.SectionState{good, bad}); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := h.store.Pool().Exec(ctx,
+		`UPDATE sections SET meetings = '{"not":"an array"}'::jsonb WHERE class_number = 7403`); err != nil {
+		t.Fatal(err)
+	}
+
+	got, err := h.store.SectionsByCourse(ctx, "1269", "cs402")
+	if err != nil {
+		t.Fatalf("one bad row broke the whole listing: %v", err)
+	}
+	if len(got) != 2 {
+		t.Fatalf("got %d sections, want both", len(got))
+	}
+	for _, s := range got {
+		switch s.ClassNumber {
+		case 7402:
+			if len(s.Meetings) != 1 {
+				t.Errorf("the healthy section lost its meeting: %+v", s.Meetings)
+			}
+		case 7403:
+			if len(s.Meetings) != 0 {
+				t.Errorf("the corrupt section should show no time, got %+v", s.Meetings)
+			}
+		}
+	}
+}
+
+// TestMockServesRealCS341Schedule: end to end through the poller, using the
+// captured live response, so the times asserted here are real UW data.
+func TestMockServesRealCS341Schedule(t *testing.T) {
+	h := newHarness(t)
+	ctx := context.Background()
+
+	if _, err := h.pol.EnsureCourse(ctx, h.term, "cs341"); err != nil {
+		t.Fatal(err)
+	}
+	got, err := h.store.SectionsByCourse(ctx, "1269", "cs341")
+	if err != nil || len(got) != 7 {
+		t.Fatalf("SectionsByCourse: %v, %d rows", err, len(got))
+	}
+	want := map[int]source.Meeting{
+		6003: {Days: "NYNYNNN", Start: "13:00", End: "14:20"}, // LEC 001, Tue/Thu 1:00-2:20 PM
+		6358: {Days: "NNNNYNN", Start: "10:30", End: "11:20"}, // LAB 101, Fri 10:30-11:20 AM
+		5934: {Days: "NNNNYNN", Start: "13:30", End: "14:20"}, // LAB 103, Fri 1:30-2:20 PM
+		// TST 201 appears TWICE with identical data in the live response; the
+		// len==1 check below is the dedup working on real API output.
+		6549: {Days: "YNNNNNN", Start: "18:00", End: "19:50"}, // TST 201, Mon 6:00-7:50 PM
+	}
+	for _, s := range got {
+		w, ok := want[s.ClassNumber]
+		if !ok {
+			continue
+		}
+		if len(s.Meetings) != 1 || s.Meetings[0] != w {
+			t.Errorf("class %d (%s): meetings %+v, want [%+v]", s.ClassNumber, s.SectionName, s.Meetings, w)
+		}
+	}
+}

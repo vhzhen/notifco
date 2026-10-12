@@ -97,6 +97,12 @@ func New() (*Source, error) {
 		ClassSection     int     `json:"classSection"`
 		MaxEnrollmentCap int     `json:"maxEnrollmentCapacity"`
 		EnrolledStudents int     `json:"enrolledStudents"`
+		ScheduleData     []struct {
+			Start string `json:"classMeetingStartTime"`
+			End   string `json:"classMeetingEndTime"`
+			Week  string `json:"classMeetingWeekPatternCode"`
+			Day   string `json:"classMeetingDayPatternCode"`
+		} `json:"scheduleData"`
 	}
 	if err := readJSON("testdata/classschedules_1269_CS_341.json", &rawClasses); err != nil {
 		return nil, err
@@ -107,7 +113,14 @@ func New() (*Source, error) {
 		if r.CourseComponent == nil {
 			continue
 		}
+		var meetings []source.Meeting
+		for _, m := range r.ScheduleData {
+			if mt, ok := source.MeetingFromAPI(m.Start, m.End, m.Week, m.Day); ok {
+				meetings = append(meetings, mt)
+			}
+		}
 		cs341 = append(cs341, source.SectionState{
+			Meetings:    source.NormalizeMeetings(meetings),
 			TermCode:    s.term,
 			ClassNumber: r.ClassNumber,
 			CourseCode:  "cs341",

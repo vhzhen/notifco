@@ -373,15 +373,24 @@ type apiCourse struct {
 	Description       string `json:"description"`
 }
 
+// apiMeeting is one entry of a class's scheduleData.
+type apiMeeting struct {
+	StartTime   string `json:"classMeetingStartTime"`
+	EndTime     string `json:"classMeetingEndTime"`
+	WeekPattern string `json:"classMeetingWeekPatternCode"`
+	DayPattern  string `json:"classMeetingDayPatternCode"`
+}
+
 type apiClass struct {
-	CourseID          string  `json:"courseId"`
-	CourseOfferNumber int     `json:"courseOfferNumber"`
-	TermCode          string  `json:"termCode"`
-	ClassNumber       int     `json:"classNumber"`
-	CourseComponent   *string `json:"courseComponent"`
-	ClassSection      int     `json:"classSection"`
-	MaxEnrollmentCap  int     `json:"maxEnrollmentCapacity"`
-	EnrolledStudents  int     `json:"enrolledStudents"`
+	CourseID          string       `json:"courseId"`
+	CourseOfferNumber int          `json:"courseOfferNumber"`
+	TermCode          string       `json:"termCode"`
+	ClassNumber       int          `json:"classNumber"`
+	CourseComponent   *string      `json:"courseComponent"`
+	ClassSection      int          `json:"classSection"`
+	MaxEnrollmentCap  int          `json:"maxEnrollmentCapacity"`
+	EnrolledStudents  int          `json:"enrolledStudents"`
+	ScheduleData      []apiMeeting `json:"scheduleData"`
 }
 
 // --- CourseSource -----------------------------------------------------------
@@ -552,9 +561,23 @@ func (c *Client) CourseSections(
 			Component:   strings.ToUpper(*r.CourseComponent),
 			Capacity:    r.MaxEnrollmentCap,
 			Enrolled:    r.EnrolledStudents,
+			Meetings:    meetingsFromAPI(r.ScheduleData),
 			IsOnline:    source.IsOnlineSection(r.ClassSection),
 			ObservedAt:  now,
 		})
 	}
 	return out, nil
+}
+
+// meetingsFromAPI converts raw scheduleData into normalised meetings. Entries
+// without a usable time are dropped, so a section with none comes back empty
+// and is shown as TBA rather than with an invented time.
+func meetingsFromAPI(raw []apiMeeting) []source.Meeting {
+	in := make([]source.Meeting, 0, len(raw))
+	for _, r := range raw {
+		if m, ok := source.MeetingFromAPI(r.StartTime, r.EndTime, r.WeekPattern, r.DayPattern); ok {
+			in = append(in, m)
+		}
+	}
+	return source.NormalizeMeetings(in)
 }
