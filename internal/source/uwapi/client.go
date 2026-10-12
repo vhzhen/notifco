@@ -13,6 +13,7 @@ import (
 	"net/http"
 	"strconv"
 	"strings"
+	"sync"
 	"time"
 
 	"golang.org/x/time/rate"
@@ -45,6 +46,13 @@ type Observer interface {
 //
 // All callers share one rate limiter, so the configured ceiling holds no matter
 // how many poller workers are running.
+//
+// The limiter is adaptive. The documented upstream cap is 120 req/min, but the
+// docs call the limit experimental and send no rate-limit headers, so a client
+// configured above the documented figure is betting on observed behaviour. To
+// make that bet safe rather than reckless, a 429 halves the effective rate on
+// the spot and sustained success walks it back up toward the configured value.
+// If UW tightens enforcement, notifco self-corrects instead of hammering.
 type Client struct {
 	base    string
 	key     string
@@ -52,7 +60,30 @@ type Client struct {
 	limiter *rate.Limiter
 	log     *slog.Logger
 	obs     Observer
+
+	// configured is the rate ceiling from config, in requests per second.
+	configured float64
+
+	mu       sync.Mutex
+	current  float64 // effective rate, <= configured
+	okStreak int     // consecutive successes since the last throttle
+
+	// backoffBase is the retry backoff base. Overridable so tests do not have
+	// to sleep through real exponential delays.
+	backoffBase time.Duration
 }
+
+// Adaptive limiter tuning.
+const (
+	// throttleBackoffFactor is applied to the effective rate on each 429.
+	throttleBackoffFactor = 0.5
+	// recoveryFactor is applied when a success streak is reached.
+	recoveryFactor = 1.5
+	// recoveryStreak is how many consecutive successes earn a rate increase.
+	recoveryStreak = 200
+	// minRatePerMin floors the adaptive reduction so the poller never stalls.
+	minRatePerMin = 30.0
+)
 
 // Options configures a Client.
 type Options struct {
@@ -83,8 +114,8 @@ func New(opts Options) (*Client, error) {
 	}
 
 	// Smooth the budget across the minute rather than allowing a full-minute
-	// burst: a burst of 120 followed by silence is far more likely to trip an
-	// undocumented limiter than a steady trickle.
+	// burst: a burst of the whole allowance followed by silence is far more
+	// likely to trip an undocumented limiter than a steady trickle.
 	perSec := float64(opts.RequestsPerMinute) / 60.0
 	burst := opts.RequestsPerMinute / 12
 	if burst < 1 {
@@ -92,18 +123,78 @@ func New(opts Options) (*Client, error) {
 	}
 
 	return &Client{
-		base:    strings.TrimRight(opts.BaseURL, "/"),
-		key:     opts.APIKey,
-		http:    &http.Client{Timeout: requestTimeout},
-		limiter: rate.NewLimiter(rate.Limit(perSec), burst),
-		log:     opts.Logger,
-		obs:     opts.Observer,
+		base:        strings.TrimRight(opts.BaseURL, "/"),
+		key:         opts.APIKey,
+		http:        &http.Client{Timeout: requestTimeout},
+		limiter:     rate.NewLimiter(rate.Limit(perSec), burst),
+		log:         opts.Logger,
+		obs:         opts.Observer,
+		configured:  perSec,
+		current:     perSec,
+		backoffBase: backoffBase,
 	}, nil
+}
+
+// throttled halves the effective request rate, floored, and logs the change.
+// Called when upstream returns 429.
+func (c *Client) throttled() {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	c.okStreak = 0
+
+	floor := minRatePerMin / 60.0
+	next := c.current * throttleBackoffFactor
+	if next < floor {
+		next = floor
+	}
+	if next == c.current {
+		return
+	}
+	c.current = next
+	c.limiter.SetLimit(rate.Limit(next))
+	c.log.Warn("upstream throttled us; reducing request rate",
+		"new_rate_per_min", int(next*60), "configured_per_min", int(c.configured*60))
+}
+
+// succeeded records a success and, after a long enough clean streak, walks the
+// effective rate back toward the configured ceiling.
+func (c *Client) succeeded() {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+
+	if c.current >= c.configured {
+		return // already at the ceiling; nothing to recover
+	}
+	c.okStreak++
+	if c.okStreak < recoveryStreak {
+		return
+	}
+	c.okStreak = 0
+	next := c.current * recoveryFactor
+	if next > c.configured {
+		next = c.configured
+	}
+	c.current = next
+	c.limiter.SetLimit(rate.Limit(next))
+	c.log.Info("no recent throttling; raising request rate",
+		"new_rate_per_min", int(next*60), "configured_per_min", int(c.configured*60))
+}
+
+// RatePerMinute reports the effective rate, for tests and diagnostics.
+func (c *Client) RatePerMinute() int {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	return int(c.current * 60)
 }
 
 // get issues a GET and decodes JSON into dst, retrying on 429 and 5xx.
 func (c *Client) get(ctx context.Context, endpoint string, dst any) error {
 	url := c.base + "/" + strings.TrimLeft(endpoint, "/")
+
+	// Reduce the sustained rate at most once per logical request. Without this,
+	// a single throttled call would halve the rate once per retry attempt and
+	// slam straight to the floor.
+	reducedThisCall := false
 
 	var lastErr error
 	for attempt := 0; attempt < maxAttempts; attempt++ {
@@ -118,13 +209,22 @@ func (c *Client) get(ctx context.Context, endpoint string, dst any) error {
 
 		status, retryAfter, err := c.do(ctx, url, endpoint, dst)
 		if err == nil {
+			c.succeeded()
 			return nil
 		}
 		lastErr = err
 
-		// 404 is handled by callers that expect it; never retry it.
+		// 404 is handled by callers that expect it; never retry it, and treat
+		// it as a healthy response for rate-adaptation purposes.
 		if status == http.StatusNotFound {
+			c.succeeded()
 			return err
+		}
+		// Upstream is rate limiting us: reduce our own sustained rate, not just
+		// this attempt.
+		if status == http.StatusTooManyRequests && !reducedThisCall {
+			c.throttled()
+			reducedThisCall = true
 		}
 		// Only 429 and 5xx are worth retrying. Everything else (401, 400) is
 		// a permanent problem that retrying cannot fix.
@@ -133,7 +233,7 @@ func (c *Client) get(ctx context.Context, endpoint string, dst any) error {
 			return err
 		}
 
-		delay := backoff(attempt, retryAfter)
+		delay := c.backoff(attempt, retryAfter)
 		c.log.Warn("uwapi retrying",
 			"endpoint", endpoint, "status", status, "attempt", attempt+1,
 			"max", maxAttempts, "delay", delay.Round(time.Millisecond))
@@ -215,14 +315,18 @@ func (c *Client) do(ctx context.Context, url, endpoint string, dst any) (int, ti
 //
 // Note: we never observed a 429 in testing, so whether upstream sends
 // Retry-After is unconfirmed. Both paths are handled.
-func backoff(attempt int, retryAfter time.Duration) time.Duration {
+func (c *Client) backoff(attempt int, retryAfter time.Duration) time.Duration {
 	if retryAfter > 0 {
 		if retryAfter > backoffCap {
 			return backoffCap
 		}
 		return retryAfter
 	}
-	d := float64(backoffBase) * math.Pow(2, float64(attempt))
+	base := c.backoffBase
+	if base <= 0 {
+		base = backoffBase
+	}
+	d := float64(base) * math.Pow(2, float64(attempt))
 	if d > float64(backoffCap) {
 		d = float64(backoffCap)
 	}

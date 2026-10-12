@@ -106,7 +106,7 @@ Cloudflare and CloudFront can't host this: a Discord gateway bot holds a long-li
 
 ## Limits
 
-- **~120 distinct watched courses** at a 60 s interval. There's no bulk enrollment endpoint, so cost scales with distinct watched courses. Raise `NOTIFCO_RATE_LIMIT` or widen the interval to go further.
+- **Watched courses ≈ your rate limit**, at a 60 s interval. There's no bulk enrollment endpoint, so cost scales with distinct watched courses, and one request covers all sections of a course. The default 120 is UW's documented cap; ~266/min was measured sustained with no throttling, so raising it is viable. The client halves its own rate on a 429 and recovers on sustained success, so running above the documented figure degrades rather than breaks.
 - **No waitlist awareness.** The API exposes no waitlist or reserved-capacity field, so a section can report seats you personally can't take.
 - **Single poller.** The differ and notifier are safe to run concurrently; the poller would need a distributed lock.
 - Discord's rate limit dominates very large fan-outs. Nothing notifco can do about that.
@@ -130,7 +130,7 @@ Environment variables only — see [.env.sample](./.env.sample) for the full lis
 | `DISCORD_GUILD_ID` | — | set for instant command registration while developing |
 | `UW_API_KEY` | — | empty ⇒ fixtures instead of live data |
 | `NOTIFCO_POLL_INTERVAL` | `60s` | bounds detection lag |
-| `NOTIFCO_RATE_LIMIT` | `120` | upstream req/min ceiling |
+| `NOTIFCO_RATE_LIMIT` | `120` | upstream req/min. UW documents 120; ~266/min measured sustained with no throttling. Raise it to watch more courses — the client halves its own rate on a 429 and recovers, so it self-corrects |
 | `NOTIFCO_COOLDOWN` | `30m` | suppresses repeat alerts on a flapping section |
 
 Prometheus metrics and `/healthz` on `:9090`. `/metrics` is unauthenticated by design — keep it on localhost.
