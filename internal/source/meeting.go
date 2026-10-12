@@ -24,9 +24,6 @@ type Meeting struct {
 	End   string `json:"e"` // 24-hour "15:04"
 }
 
-// DayLabels are the column labels for Monday..Sunday.
-var DayLabels = [7]string{"M", "T", "W", "Th", "F", "S", "Su"}
-
 // NoDays is the all-No pattern.
 const NoDays = "NNNNNNN"
 

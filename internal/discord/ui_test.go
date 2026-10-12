@@ -224,11 +224,11 @@ func TestPaginationCoversEverySectionExactlyOnce(t *testing.T) {
 		}
 		total := len(paginateRows(sectionRows(sections), pageSize))
 		pages = total
-		// Table rows begin with the section name, padded. Count lines that do,
-		// so a name appearing in prose or a continuation line cannot be double counted.
-		for _, line := range strings.Split(stripANSI(v.embed.Description), "\n") {
+		// A section's own line starts with its backticked name. Bullet lines
+		// start with the bullet, so a schedule line cannot be double counted.
+		for _, line := range strings.Split(v.embed.Description, "\n") {
 			for _, s := range sections {
-				if strings.HasPrefix(line, s.SectionName+" ") {
+				if strings.HasPrefix(line, "`"+s.SectionName+"`") {
 					seen[s.SectionName]++
 				}
 			}
@@ -581,7 +581,7 @@ func sectionRows(sections []store.Section) []pageRow {
 	sections = sortSections(sections)
 	rows := make([]pageRow, 0, len(sections))
 	for _, s := range sections {
-		rows = append(rows, pageRow{group: componentTitle(s.Component), text: sectionRow(s)})
+		rows = append(rows, pageRow{group: componentTitle(s.Component), text: searchRow(s)})
 	}
 	return rows
 }

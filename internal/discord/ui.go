@@ -213,12 +213,8 @@ func sectionRow(s store.Section) string {
 
 // pageRow is one line plus the heading it belongs under.
 type pageRow struct {
-	// group is a heading printed above a run of rows (watchlist: course title).
 	group string
-	// comp is the section type (Lectures, Labs...). The table uses it only to
-	// put a blank line between types; it costs no heading space.
-	comp string
-	text string
+	text  string
 }
 
 // clampPage forces page into [0, pages-1]. Page numbers arrive inside button
@@ -372,9 +368,11 @@ func searchView(code, termName string, sections []store.Section, page int) view 
 		title = sections[0].CourseTitle
 	}
 
+	rows := make([]pageRow, 0, len(sections))
 	open, full := 0, 0
 	var newest time.Time
 	for _, s := range sections {
+		rows = append(rows, pageRow{group: componentTitle(s.Component), text: searchRow(s)})
 		if s.SeatsOpen() > 0 {
 			open++
 		} else {
@@ -385,15 +383,12 @@ func searchView(code, termName string, sections []store.Section, page int) view 
 		}
 	}
 
-	// Column widths come from the whole course, not the page, so the table does
-	// not reflow as the user pages through.
-	layout := newTableLayout(sections)
-	table, cur, pages := renderTablePage(tableRows(sections, layout), layout, page)
+	body, cur, pages := renderPage(rows, page, pageSize)
 
 	var desc strings.Builder
 	fmt.Fprintf(&desc, "**%s** · %d open · %d full\n\n", plural(len(sections), "section"), open, full)
-	desc.WriteString(table)
-	fmt.Fprintf(&desc, "\n*Watch one: `/watch %s %s`*", courseLabel(code), exampleSection(sections))
+	desc.WriteString(body)
+	fmt.Fprintf(&desc, "\n\n*Watch one: `/watch %s %s`*", courseLabel(code), exampleSection(sections))
 
 	color := colorFull
 	if open > 0 {
