@@ -81,7 +81,7 @@ func commands() []*discordgo.ApplicationCommand {
 			Description: "Search UW courses and see live seat counts",
 			Options: []*discordgo.ApplicationCommandOption{{
 				Name:         "code",
-				Description:  "Course code or title, e.g. CS 341",
+				Description:  "Course code, e.g. CS 341",
 				Type:         discordgo.ApplicationCommandOptionString,
 				Required:     true,
 				Autocomplete: true,
@@ -159,9 +159,13 @@ func (b *Bot) Run(ctx context.Context) error {
 	// not there. That is a development convenience only.
 	//
 	// Global commands work in every server the bot is in, including ones it
-	// joins later, which is what a publicly invitable bot needs. They can take
-	// up to an hour to propagate, so new guilds additionally get an instant
-	// guild-scoped copy via handleGuildCreate.
+	// joins later, which is what a publicly invitable bot needs. Changes to the
+	// global set can take up to an hour to propagate, but a guild joining after
+	// that is immediate.
+	//
+	// Do NOT also register guild-scoped copies: Discord lists a guild command
+	// and a global command of the same name separately, so every command would
+	// appear twice in the picker.
 	if b.opts.GuildID != "" {
 		registered, err := b.session.ApplicationCommandBulkOverwrite(appID, b.opts.GuildID, commands())
 		if err != nil {
@@ -175,50 +179,30 @@ func (b *Bot) Run(ctx context.Context) error {
 		if err != nil {
 			return fmt.Errorf("discord: register global commands: %w", err)
 		}
-		b.log.Info("slash commands registered globally",
-			"count", len(registered),
-			"note", "new servers may take up to an hour to see them; joins get an instant copy")
+		b.log.Info("slash commands registered globally", "count", len(registered))
 	}
 
 	<-ctx.Done()
 	return nil
 }
 
-// maxGuildFastRegister bounds per-guild command registration.
+// handleGuildCreate logs guild joins. It deliberately does NOT register
+// commands.
 //
-// GuildCreate fires for every guild at connect, not just genuine joins, so this
-// runs once per guild on every boot. That is desirable at small scale — it
-// gives instant commands and self-heals stale guild-scoped sets after a command
-// rename — but it is one API call per guild, so above this count notifco relies
-// on global registration alone.
-const maxGuildFastRegister = 50
-
-// handleGuildCreate gives a guild an immediate guild-scoped copy of the command
-// set, so users can run commands the moment the bot is invited instead of
-// waiting for global propagation.
+// An earlier version registered a guild-scoped copy of the command set here,
+// intending to make commands available instantly instead of waiting for global
+// propagation. That was wrong twice over:
 //
-// Note on ordering: discordgo dispatches Ready BEFORE the GuildCreate burst for
-// existing guilds, so this cannot distinguish a genuine join from the initial
-// load. That is fine and in fact useful: re-registering on boot keeps
-// guild-scoped sets from drifting out of date with the global set, which would
-// otherwise shadow it with stale commands.
-func (b *Bot) handleGuildCreate(s *discordgo.Session, g *discordgo.GuildCreate) {
-	// Guild-scoped dev mode already registered to its one guild.
-	if b.opts.GuildID != "" || b.appID == "" {
-		return
-	}
-	if n := len(s.State.Guilds); n > maxGuildFastRegister {
-		b.log.Debug("skipping per-guild command registration; relying on global",
-			"guilds", n, "cap", maxGuildFastRegister)
-		return
-	}
-	if _, err := b.session.ApplicationCommandBulkOverwrite(b.appID, g.ID, commands()); err != nil {
-		// Not fatal: global registration still covers this guild.
-		b.log.Warn("could not fast-register commands for guild",
-			"guild", g.ID, "name", g.Name, "err", err)
-		return
-	}
-	b.log.Info("commands available in guild", "guild", g.ID, "name", g.Name)
+//   - Discord does not merge a guild command with a global command of the same
+//     name. It lists both, so every command appeared TWICE in the picker.
+//   - It solved a problem that does not exist. The "up to an hour" delay applies
+//     to propagating *changes* to the global command set. Once a global command
+//     exists, a guild the bot joins later sees it immediately, because global
+//     commands belong to the application rather than to any guild.
+//
+// Global registration alone is correct for a public bot.
+func (b *Bot) handleGuildCreate(_ *discordgo.Session, g *discordgo.GuildCreate) {
+	b.log.Info("joined guild", "guild", g.ID, "name", g.Name)
 }
 
 func (b *Bot) handleInteraction(s *discordgo.Session, i *discordgo.InteractionCreate) {
