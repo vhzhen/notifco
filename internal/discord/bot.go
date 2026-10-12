@@ -7,6 +7,7 @@ import (
 	"fmt"
 	"log/slog"
 	"strings"
+	"sync/atomic"
 	"time"
 
 	"github.com/bwmarrin/discordgo"
@@ -46,6 +47,12 @@ type Bot struct {
 	opts    Options
 	log     *slog.Logger
 	session *discordgo.Session
+
+	// ready distinguishes the GuildCreate burst emitted during the initial
+	// connect from genuine joins that happen afterwards.
+	ready atomic.Bool
+	// appID is resolved once the session is open.
+	appID string
 }
 
 // New creates a Bot. It does not connect; call Run.
@@ -133,9 +140,11 @@ func commands() []*discordgo.ApplicationCommand {
 // Run connects, registers commands, and serves until ctx is cancelled.
 func (b *Bot) Run(ctx context.Context) error {
 	b.session.AddHandler(func(s *discordgo.Session, r *discordgo.Ready) {
+		b.ready.Store(true)
 		b.log.Info("discord connected", "user", r.User.Username, "guilds", len(r.Guilds))
 	})
 	b.session.AddHandler(b.handleInteraction)
+	b.session.AddHandler(b.handleGuildCreate)
 
 	if err := b.session.Open(); err != nil {
 		return fmt.Errorf("discord: open: %w", err)
@@ -146,19 +155,59 @@ func (b *Bot) Run(ctx context.Context) error {
 	if appID == "" {
 		appID = b.session.State.User.ID
 	}
-	// Guild-scoped commands appear instantly; global ones take up to an hour.
-	registered, err := b.session.ApplicationCommandBulkOverwrite(appID, b.opts.GuildID, commands())
-	if err != nil {
-		return fmt.Errorf("discord: register commands: %w", err)
-	}
-	scope := "globally"
+	b.appID = appID
+
+	// Scope matters a lot here.
+	//
+	// Guild-scoped commands appear instantly but ONLY in that one guild, so a
+	// bot invited elsewhere looks completely broken: the commands simply are
+	// not there. That is a development convenience only.
+	//
+	// Global commands work in every server the bot is in, including ones it
+	// joins later, which is what a publicly invitable bot needs. They can take
+	// up to an hour to propagate, so new guilds additionally get an instant
+	// guild-scoped copy via handleGuildCreate.
 	if b.opts.GuildID != "" {
-		scope = "to guild " + b.opts.GuildID
+		registered, err := b.session.ApplicationCommandBulkOverwrite(appID, b.opts.GuildID, commands())
+		if err != nil {
+			return fmt.Errorf("discord: register guild commands: %w", err)
+		}
+		b.log.Warn("commands registered to a SINGLE guild only — "+
+			"they will NOT appear in any other server. Unset DISCORD_GUILD_ID for a public bot.",
+			"count", len(registered), "guild", b.opts.GuildID)
+	} else {
+		registered, err := b.session.ApplicationCommandBulkOverwrite(appID, "", commands())
+		if err != nil {
+			return fmt.Errorf("discord: register global commands: %w", err)
+		}
+		b.log.Info("slash commands registered globally",
+			"count", len(registered),
+			"note", "new servers may take up to an hour to see them; joins get an instant copy")
 	}
-	b.log.Info("slash commands registered", "count", len(registered), "scope", scope)
 
 	<-ctx.Done()
 	return nil
+}
+
+// handleGuildCreate gives a newly joined guild an immediate guild-scoped copy of
+// the command set, so users can run commands the moment they invite the bot
+// instead of waiting for global propagation.
+//
+// Only genuine joins are handled. discordgo also emits GuildCreate for every
+// existing guild during the initial connect, and registering for all of them on
+// each boot would mean one API call per guild at startup.
+func (b *Bot) handleGuildCreate(_ *discordgo.Session, g *discordgo.GuildCreate) {
+	if !b.ready.Load() || b.opts.GuildID != "" || b.appID == "" {
+		return
+	}
+	if _, err := b.session.ApplicationCommandBulkOverwrite(b.appID, g.ID, commands()); err != nil {
+		// Not fatal: global registration still covers this guild shortly.
+		b.log.Warn("could not fast-register commands for new guild",
+			"guild", g.ID, "name", g.Name, "err", err)
+		return
+	}
+	b.log.Info("joined guild; commands available immediately",
+		"guild", g.ID, "name", g.Name)
 }
 
 func (b *Bot) handleInteraction(s *discordgo.Session, i *discordgo.InteractionCreate) {
