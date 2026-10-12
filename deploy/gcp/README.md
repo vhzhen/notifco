@@ -102,35 +102,78 @@ GCP's Ubuntu images need no iptables workaround — that one is Oracle-specific.
 
 ## 5. Deploy
 
-```sh
-git clone https://github.com/vhzhen/notifco.git
-cd notifco
-cp .env.sample .env
-nano .env
-```
+> **Do not build on the VM.** 1 GB of RAM is below what the Go compiler needs
+> alongside the Postgres and Redis images. Measured on this exact machine: the
+> compile step sat at 83–93% iowait with the compiler holding ~395 MB RSS
+> against 83 MB free, pushed 626 MB into swap, had not finished after 10
+> minutes, and left the box unreachable over SSH. The same build
+> cross-compiles on a laptop in about 8 seconds.
+>
+> So build the binary on your machine and ship it. The VM never needs a Go
+> toolchain.
 
-Fill in:
-
-```sh
-DISCORD_TOKEN=...            # Developer Portal -> Bot -> Reset Token
-DISCORD_APP_ID=...           # Developer Portal -> General Information
-DISCORD_GUILD_ID=...         # your server id; omit for global registration
-UW_API_KEY=...               # leave empty to run on fixtures
-NOTIFCO_SOURCE=uwapi
-POSTGRES_PASSWORD=...        # anything long and random
-```
-
-Then start it with **both** compose files, base first:
+**On your machine**, in the repo:
 
 ```sh
-docker compose -f docker-compose.yml -f docker-compose.gcp.yml up -d --build
-docker compose logs -f notifco
+make dist-linux          # -> dist/notifco-linux-amd64, static, ~17 MB
 ```
 
-> The first build compiles Go on a shared-vCPU machine and takes a few minutes.
-> If it gets OOM-killed, see Troubleshooting.
+**Get the code and the binary onto the VM.** If the repo is private, add a
+read-only deploy key rather than making it public:
 
-Expect:
+```sh
+# on the VM
+ssh-keygen -t ed25519 -N "" -C "notifco-deploy" -f ~/.ssh/notifco_deploy
+cat >> ~/.ssh/config <<'EOF'
+Host github.com
+  User git
+  IdentityFile ~/.ssh/notifco_deploy
+  IdentitiesOnly yes
+  StrictHostKeyChecking accept-new
+EOF
+chmod 600 ~/.ssh/config
+cat ~/.ssh/notifco_deploy.pub
+```
+
+Paste that public key into **GitHub → repo → Settings → Deploy keys → Add**,
+leaving "Allow write access" **unchecked**. Then:
+
+```sh
+# on the VM
+git clone git@github.com:vhzhen/notifco.git ~/notifco
+mkdir -p ~/notifco/dist
+```
+
+```sh
+# from your machine
+gcloud compute scp dist/notifco-linux-amd64 \
+  YOUR_VM:~/notifco/dist/notifco-linux-amd64 --zone=us-central1-a
+gcloud compute scp .env YOUR_VM:/tmp/notifco.env --zone=us-central1-a
+```
+
+`scp`-ing `.env` keeps your token and API key off the terminal and out of shell
+history. On the VM:
+
+```sh
+mv /tmp/notifco.env ~/notifco/.env && chmod 600 ~/notifco/.env
+```
+
+Make sure it contains `DISCORD_TOKEN`, `DISCORD_APP_ID`, `DISCORD_GUILD_ID`,
+`UW_API_KEY`, `NOTIFCO_SOURCE=uwapi`, and a long random `POSTGRES_PASSWORD`.
+
+**Start it** with all three compose files, in this order:
+
+```sh
+cd ~/notifco
+sudo docker compose \
+  -f docker-compose.yml \
+  -f docker-compose.gcp.yml \
+  -f docker-compose.prebuilt.yml \
+  up -d --build
+```
+
+The "build" is now just an Alpine image with the binary copied in — seconds,
+not minutes. Expect:
 
 ```
 level=INFO msg="database ready"
@@ -138,6 +181,31 @@ level=INFO msg="redis ready"
 level=INFO msg="discord connected" user=Notifco guilds=1
 level=INFO msg="slash commands registered" count=4
 level=INFO msg="catalog loaded" term=1269 courses=7891
+```
+
+### Measured footprint
+
+Actual usage on e2-micro once running, well inside the limits:
+
+| Container | Using | Limit |
+|---|---|---|
+| notifco | 23 MB | 180 MB |
+| postgres | 63 MB | 256 MB |
+| redis | 6 MB | 80 MB |
+| **total** | **~92 MB** | 516 MB |
+
+Host shows roughly 510 MB available with swap barely touched (~105 MB). There
+is comfortable headroom; the 1 GB limit only bites when *compiling*.
+
+### Upgrading later
+
+```sh
+# your machine
+make dist-linux
+gcloud compute scp dist/notifco-linux-amd64 YOUR_VM:~/notifco/dist/ --zone=us-central1-a
+# VM
+cd ~/notifco && git pull
+sudo docker compose -f docker-compose.yml -f docker-compose.gcp.yml -f docker-compose.prebuilt.yml up -d --build
 ```
 
 ## 6. Verify
@@ -167,8 +235,9 @@ After=docker.service network-online.target
 Type=oneshot
 RemainAfterExit=yes
 WorkingDirectory=/home/$USER/notifco
-ExecStart=/usr/bin/docker compose -f docker-compose.yml -f docker-compose.gcp.yml up -d
-ExecStop=/usr/bin/docker compose -f docker-compose.yml -f docker-compose.gcp.yml down
+ExecStart=/usr/bin/docker compose -f docker-compose.yml -f docker-compose.gcp.yml -f docker-compose.prebuilt.yml up -d
+ExecStop=/usr/bin/docker compose -f docker-compose.yml -f docker-compose.gcp.yml -f docker-compose.prebuilt.yml down
+TimeoutStartSec=300
 User=$USER
 
 [Install]
@@ -194,18 +263,46 @@ covered by free-tier credit with a $0 subtotal.
 Only Postgres holds anything irreplaceable (users, subscriptions, notification
 log). Redis is a cache; the catalog refetches.
 
+Ubuntu 26.04's minimal image ships **no `crontab`**, so use a systemd timer:
+
 ```sh
 mkdir -p ~/backups
 cat > ~/backup-notifco.sh <<'EOF'
 #!/bin/sh
 set -eu
 cd "$HOME/notifco"
-docker compose exec -T postgres pg_dump -U notifco notifco \
+docker compose -f docker-compose.yml -f docker-compose.gcp.yml -f docker-compose.prebuilt.yml \
+  exec -T postgres pg_dump -U notifco notifco \
   | gzip > "$HOME/backups/notifco-$(date +%F).sql.gz"
 find "$HOME/backups" -name 'notifco-*.sql.gz' -mtime +14 -delete
 EOF
 chmod +x ~/backup-notifco.sh
-( crontab -l 2>/dev/null; echo "0 4 * * * $HOME/backup-notifco.sh" ) | crontab -
+
+sudo tee /etc/systemd/system/notifco-backup.service > /dev/null <<EOF
+[Unit]
+Description=notifco nightly Postgres dump
+After=docker.service
+[Service]
+Type=oneshot
+User=root
+Environment=HOME=$HOME
+ExecStart=/bin/sh $HOME/backup-notifco.sh
+EOF
+
+sudo tee /etc/systemd/system/notifco-backup.timer > /dev/null <<'EOF'
+[Unit]
+Description=Run notifco backup daily at 04:00
+[Timer]
+OnCalendar=*-*-* 04:00:00
+Persistent=true
+[Install]
+WantedBy=timers.target
+EOF
+
+sudo systemctl daemon-reload
+sudo systemctl enable --now notifco-backup.timer
+sudo systemctl start notifco-backup.service   # test it now
+ls -lh ~/backups/
 ```
 
 Restore:
@@ -215,25 +312,18 @@ gunzip -c ~/backups/notifco-YYYY-MM-DD.sql.gz \
   | docker compose exec -T postgres psql -U notifco -d notifco
 ```
 
-## 10. Upgrade
-
-```sh
-cd ~/notifco && git pull
-docker compose -f docker-compose.yml -f docker-compose.gcp.yml up -d --build
-```
-
-Migrations are idempotent and run on boot.
-
 ---
 
 ## Troubleshooting
 
 | Symptom | Cause and fix |
 |---|---|
-| `docker build` killed, or exit 137 | Out of memory compiling Go on 1 GB. Confirm swap is active (`free -h`). Failing that, build elsewhere: `docker build` in Cloud Shell, push to Artifact Registry, and pull on the VM. |
+| Build hangs for many minutes, high `wa` in `vmstat`, SSH drops | You are compiling on the VM. Don't — use `make dist-linux` and `docker-compose.prebuilt.yml` (step 5). |
 | Container restart-looping with code 137 | The OOM killer. Check `docker stats`; lower the limits in `docker-compose.gcp.yml` further. |
 | Postgres `FATAL: sorry, too many clients` | `NOTIFCO_DB_MAX_CONNS` exceeds Postgres `max_connections`. The GCP override sets 6 against 30. |
 | Slash commands missing | Global registration takes up to an hour. Set `DISCORD_GUILD_ID` for instant. |
+| `crontab: command not found` | Minimal Ubuntu 26.04 has no cron. Use the systemd timer in step 9. |
+| `could not read Username for 'https://github.com'` | Private repo over HTTPS. Add the read-only deploy key from step 5. |
 | Bot online, no alerts ever | Expected. Alerts fire only on a **full → open** edge. An already-open section never notifies until it fills and frees again. |
 | 401 from the UW API | Key wrong or revoked. Re-register (see the main README). |
 | Unexpected charge | Almost always disk type (**Balanced** instead of **Standard**) or a non-free region. Check **Billing → Reports**, group by SKU. |
