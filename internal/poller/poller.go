@@ -121,6 +121,12 @@ type Poller struct {
 	mu    sync.Mutex
 	queue priorityQueue
 	known map[string]*job // "term:course" -> job
+
+	// titles caches course titles ("term:code" -> title). ClassSchedules
+	// carries no title, so each is fetched once from the catalog endpoint and
+	// remembered; a course title does not change within a term.
+	titleMu sync.Mutex
+	titles  map[string]string
 }
 
 // New builds a Poller, filling in defaults.
@@ -147,9 +153,10 @@ func New(opts Options) *Poller {
 		opts.Logger = slog.Default()
 	}
 	return &Poller{
-		opts:  opts,
-		log:   opts.Logger,
-		known: make(map[string]*job),
+		opts:   opts,
+		log:    opts.Logger,
+		known:  make(map[string]*job),
+		titles: make(map[string]string),
 	}
 }
 
@@ -466,8 +473,12 @@ func (p *Poller) SeedCatalog(ctx context.Context, term source.TermCode) error {
 }
 
 // EnsureCourse fetches and stores one course's sections on demand. Called by
-// /watch and /search so a user can subscribe to a course nobody has
-// watched before.
+// /watch and /search so a user can subscribe to a course nobody has watched
+// before.
+//
+// It also resolves the course title. The sections endpoint has none, so without
+// this a course fetched on demand would show no title until some later restart
+// happened to back-fill it.
 func (p *Poller) EnsureCourse(ctx context.Context, term source.TermCode, courseCode string) ([]source.SectionState, error) {
 	subject, catalog, err := source.SplitCourseCode(courseCode)
 	if err != nil {
@@ -480,6 +491,15 @@ func (p *Poller) EnsureCourse(ctx context.Context, term source.TermCode, courseC
 	if len(states) == 0 {
 		return nil, nil
 	}
+
+	// A failed title lookup must not fail the whole request: the sections are
+	// the important part, and the UI degrades to showing the bare course code.
+	if title := p.courseTitle(ctx, term, subject, catalog); title != "" {
+		for i := range states {
+			states[i].CourseTitle = title
+		}
+	}
+
 	// Seed differ state so the first observation is never treated as a
 	// transition for a section that was already open.
 	if _, err := p.opts.Differ.ObserveAll(ctx, states); err != nil {
@@ -489,4 +509,31 @@ func (p *Poller) EnsureCourse(ctx context.Context, term source.TermCode, courseC
 		return nil, err
 	}
 	return states, nil
+}
+
+// courseTitle returns a course's catalog title, fetching it at most once per
+// course. Returns "" if it cannot be resolved.
+func (p *Poller) courseTitle(ctx context.Context, term source.TermCode, subject, catalog string) string {
+	key := string(term) + ":" + source.NormalizeCourseCode(subject+catalog)
+
+	p.titleMu.Lock()
+	if t, ok := p.titles[key]; ok {
+		p.titleMu.Unlock()
+		return t
+	}
+	p.titleMu.Unlock()
+
+	info, err := p.opts.Source.CourseInfo(ctx, term, subject, catalog)
+	if err != nil {
+		p.log.Warn("course title lookup failed", "course", subject+catalog, "err", err)
+		return ""
+	}
+	if info == nil || info.Title == "" {
+		return ""
+	}
+
+	p.titleMu.Lock()
+	p.titles[key] = info.Title
+	p.titleMu.Unlock()
+	return info.Title
 }

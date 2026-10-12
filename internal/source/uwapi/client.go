@@ -68,6 +68,11 @@ type Client struct {
 	current  float64 // effective rate, <= configured
 	okStreak int     // consecutive successes since the last throttle
 
+	// termNames caches term codes to names ("1269" -> "Fall 2026"). They never
+	// change, so entries live for the process lifetime.
+	termMu    sync.Mutex
+	termNames map[source.TermCode]string
+
 	// backoffBase is the retry backoff base. Overridable so tests do not have
 	// to sleep through real exponential delays.
 	backoffBase time.Duration
@@ -361,6 +366,7 @@ type apiCourse struct {
 	CourseID          string `json:"courseId"`
 	CourseOfferNumber int    `json:"courseOfferNumber"`
 	TermCode          string `json:"termCode"`
+	TermName          string `json:"termName"`
 	SubjectCode       string `json:"subjectCode"`
 	CatalogNumber     string `json:"catalogNumber"`
 	Title             string `json:"title"`
@@ -434,6 +440,69 @@ func (c *Client) ScheduledCourseIDs(ctx context.Context, term source.TermCode) (
 		return nil, err
 	}
 	return ids, nil
+}
+
+// CourseInfo returns one course's catalog entry. Courses/{term}/{subject}/{catalog}
+// carries the title and the term name in a single small response (~1 KB),
+// versus the 7.1 MB full-catalog download.
+func (c *Client) CourseInfo(
+	ctx context.Context, term source.TermCode, subject, catalog string,
+) (*source.Course, error) {
+	endpoint := fmt.Sprintf("Courses/%s/%s/%s", term,
+		strings.ToUpper(subject), strings.ToUpper(catalog))
+
+	var raw []apiCourse
+	if err := c.get(ctx, endpoint, &raw); err != nil {
+		if IsNotFound(err) {
+			return nil, nil
+		}
+		return nil, err
+	}
+	if len(raw) == 0 {
+		return nil, nil
+	}
+	r := raw[0]
+	// Opportunistically learn the term name from the same response.
+	if r.TermName != "" {
+		c.rememberTermName(term, r.TermName)
+	}
+	return &source.Course{
+		TermCode:    term,
+		CourseCode:  source.NormalizeCourseCode(r.SubjectCode + r.CatalogNumber),
+		CourseID:    r.CourseID,
+		Subject:     strings.ToUpper(r.SubjectCode),
+		Catalog:     strings.ToUpper(r.CatalogNumber),
+		Title:       strings.TrimSpace(r.Title),
+		Description: r.Description,
+	}, nil
+}
+
+// TermName returns e.g. "Fall 2026" for term 1269. Term names never change, so
+// results are cached for the life of the process. If the API is unreachable the
+// name is derived locally from the term code rather than failing the UI.
+func (c *Client) TermName(ctx context.Context, term source.TermCode) (string, error) {
+	c.termMu.Lock()
+	if n, ok := c.termNames[term]; ok {
+		c.termMu.Unlock()
+		return n, nil
+	}
+	c.termMu.Unlock()
+
+	var t apiTerm
+	if err := c.get(ctx, "Terms/"+string(term), &t); err != nil || strings.TrimSpace(t.Name) == "" {
+		return source.FallbackTermName(term), err
+	}
+	c.rememberTermName(term, t.Name)
+	return t.Name, nil
+}
+
+func (c *Client) rememberTermName(term source.TermCode, name string) {
+	c.termMu.Lock()
+	defer c.termMu.Unlock()
+	if c.termNames == nil {
+		c.termNames = make(map[source.TermCode]string)
+	}
+	c.termNames[term] = name
 }
 
 // CourseSections returns every section of one course, with enrollment.

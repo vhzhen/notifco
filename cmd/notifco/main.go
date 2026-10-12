@@ -177,6 +177,7 @@ func run(role string) error {
 			GuildID: cfg.DiscordGuildID,
 			Store:   st,
 			Ensurer: pol,
+			Namer:   src,
 			Logger:  log,
 			Term:    term,
 		})
@@ -214,7 +215,7 @@ func run(role string) error {
 		}()
 		// Give the gateway a moment to establish before delivering.
 		time.Sleep(2 * time.Second)
-		notif.SetTransport(discord.NewTransport(bot.Session(), st, log))
+		notif.SetTransport(discord.NewTransport(bot.Session(), st, src, log))
 
 		// Seed the catalog so /search works immediately.
 		go func() {

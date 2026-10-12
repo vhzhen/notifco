@@ -111,7 +111,6 @@ func New() (*Source, error) {
 			TermCode:    s.term,
 			ClassNumber: r.ClassNumber,
 			CourseCode:  "cs341",
-			CourseTitle: "Algorithms",
 			SectionName: source.SectionNameFrom(*r.CourseComponent, r.ClassSection),
 			Component:   strings.ToUpper(*r.CourseComponent),
 			Capacity:    r.MaxEnrollmentCap,
@@ -192,6 +191,28 @@ func (s *Source) Courses(_ context.Context, term source.TermCode) ([]source.Cour
 		out = append(out, c)
 	}
 	return out, nil
+}
+
+// CourseInfo serves a catalog entry from the fixtures, matching what the real
+// API returns for Courses/{term}/{subject}/{catalog}.
+func (s *Source) CourseInfo(
+	_ context.Context, term source.TermCode, subject, catalog string,
+) (*source.Course, error) {
+	s.mu.RLock()
+	defer s.mu.RUnlock()
+	code := source.NormalizeCourseCode(subject + catalog)
+	for _, c := range s.courses {
+		if c.CourseCode == code {
+			c.TermCode = term
+			return &c, nil
+		}
+	}
+	return nil, nil
+}
+
+// TermName derives the name locally; the mock has no term endpoint.
+func (s *Source) TermName(_ context.Context, term source.TermCode) (string, error) {
+	return source.FallbackTermName(term), nil
 }
 
 func (s *Source) ScheduledCourseIDs(context.Context, source.TermCode) ([]string, error) {

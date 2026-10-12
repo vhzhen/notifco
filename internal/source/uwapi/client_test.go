@@ -183,3 +183,117 @@ func TestStatusErrorCarriesCode(t *testing.T) {
 		t.Errorf("Error() = %q, want it to mention the status", e.Error())
 	}
 }
+
+const math135JSON = `[{"courseId":"006878","courseOfferNumber":1,"termCode":"1269","termName":"Fall 2026",
+"subjectCode":"MATH","catalogNumber":"135","title":"Algebra for Honours Mathematics","description":"d"}]`
+
+// TestCourseInfoReturnsTitle: the title shown in the UI comes from here, since
+// ClassSchedules carries none.
+func TestCourseInfoReturnsTitle(t *testing.T) {
+	var path atomic.Value
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		path.Store(r.URL.Path)
+		_, _ = w.Write([]byte(math135JSON))
+	}))
+	defer srv.Close()
+
+	c := quietClient(t, srv.URL, 600)
+	got, err := c.CourseInfo(context.Background(), "1269", "math", "135")
+	if err != nil {
+		t.Fatalf("CourseInfo: %v", err)
+	}
+	if got == nil {
+		t.Fatal("CourseInfo returned nil for an existing course")
+	}
+	if got.Title != "Algebra for Honours Mathematics" {
+		t.Errorf("Title = %q", got.Title)
+	}
+	if got.CourseCode != "math135" || got.Subject != "MATH" || got.Catalog != "135" {
+		t.Errorf("identity wrong: %+v", got)
+	}
+	if want := "/Courses/1269/MATH/135"; path.Load() != want {
+		t.Errorf("requested %v, want %s (uppercased subject/catalog)", path.Load(), want)
+	}
+}
+
+func TestCourseInfoNotFoundIsNilNotError(t *testing.T) {
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		w.WriteHeader(http.StatusNotFound)
+	}))
+	defer srv.Close()
+
+	c := quietClient(t, srv.URL, 600)
+	got, err := c.CourseInfo(context.Background(), "1269", "ZZZ", "999")
+	if err != nil || got != nil {
+		t.Fatalf("got (%v, %v), want (nil, nil) for a missing course", got, err)
+	}
+	// An empty array is also "not found", not a crash on raw[0].
+	srv2 := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		_, _ = w.Write([]byte(`[]`))
+	}))
+	defer srv2.Close()
+	c2 := quietClient(t, srv2.URL, 600)
+	if got, err := c2.CourseInfo(context.Background(), "1269", "ZZZ", "999"); err != nil || got != nil {
+		t.Fatalf("empty array: got (%v, %v), want (nil, nil)", got, err)
+	}
+}
+
+// TestTermNameCachedAcrossCalls: names never change, so asking twice must cost
+// one upstream request.
+func TestTermNameCachedAcrossCalls(t *testing.T) {
+	var hits atomic.Int32
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		hits.Add(1)
+		_, _ = w.Write([]byte(`{"termCode":"1269","name":"Fall 2026"}`))
+	}))
+	defer srv.Close()
+
+	c := quietClient(t, srv.URL, 600)
+	for i := 0; i < 5; i++ {
+		got, err := c.TermName(context.Background(), "1269")
+		if err != nil || got != "Fall 2026" {
+			t.Fatalf("call %d: (%q, %v)", i, got, err)
+		}
+	}
+	if n := hits.Load(); n != 1 {
+		t.Errorf("5 TermName calls made %d upstream requests, want 1", n)
+	}
+}
+
+// TestTermNameFallsBackWhenUpstreamIsDown: the UI must never show a bare
+// "1269" just because the API is having a bad day.
+func TestTermNameFallsBackWhenUpstreamIsDown(t *testing.T) {
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		w.WriteHeader(http.StatusBadRequest) // permanent, so no retry delay
+	}))
+	defer srv.Close()
+
+	c := quietClient(t, srv.URL, 600)
+	got, _ := c.TermName(context.Background(), "1269")
+	if got != "Fall 2026" {
+		t.Errorf("fallback = %q, want derived \"Fall 2026\"", got)
+	}
+}
+
+// TestCourseInfoSeedsTermNameCache: the same response that carries the title
+// also carries termName, so a following TermName call should cost nothing.
+func TestCourseInfoSeedsTermNameCache(t *testing.T) {
+	var hits atomic.Int32
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		hits.Add(1)
+		_, _ = w.Write([]byte(math135JSON))
+	}))
+	defer srv.Close()
+
+	c := quietClient(t, srv.URL, 600)
+	if _, err := c.CourseInfo(context.Background(), "1269", "MATH", "135"); err != nil {
+		t.Fatal(err)
+	}
+	name, err := c.TermName(context.Background(), "1269")
+	if err != nil || name != "Fall 2026" {
+		t.Fatalf("TermName = (%q, %v)", name, err)
+	}
+	if n := hits.Load(); n != 1 {
+		t.Errorf("made %d requests, want 1 (TermName should be served from the CourseInfo response)", n)
+	}
+}

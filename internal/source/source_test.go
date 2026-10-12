@@ -165,3 +165,25 @@ func TestSectionKeyString(t *testing.T) {
 		t.Errorf("String() = %q, want %q", got, want)
 	}
 }
+
+func TestFallbackTermName(t *testing.T) {
+	tests := []struct {
+		in   TermCode
+		want string
+	}{
+		{"1261", "Winter 2026"},
+		{"1265", "Spring 2026"},
+		{"1269", "Fall 2026"},
+		{"1271", "Winter 2027"},
+		{"1199", "Fall 2019"},
+		{"", ""},
+		{"12", "12"},     // too short: show it rather than invent a name
+		{"abcd", "abcd"}, // not numeric
+		{"1267", "1267"}, // unknown season digit
+	}
+	for _, tc := range tests {
+		if got := FallbackTermName(tc.in); got != tc.want {
+			t.Errorf("FallbackTermName(%q) = %q, want %q", tc.in, got, tc.want)
+		}
+	}
+}

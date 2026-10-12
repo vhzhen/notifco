@@ -13,11 +13,20 @@ Get a DM the moment a full University of Waterloo course section has a seat open
 Then, in any channel:
 
 ```
-/search CS 341              see every section with live seat counts
-/watch CS 341 LEC 002       get DMed when that section frees up
+/search MATH 135            every section with live seat counts
+/watch MATH 135 LEC 002     get DMed when that section frees up
 /watchlist                  what you're watching
-/unwatch CS 341             stop
+/unwatch MATH 135           stop
 ```
+
+Results are laid out like this, with **Previous / Next** buttons when a course has more sections than fit on one page (MATH 135 has 25):
+
+> **MATH 135 - Algebra for Honours Mathematics [Fall 2026]**
+> 25 sections · 🟢 23 open · 🔴 2 full
+>
+> **Lectures**
+> 🟢 `LEC 002` ▰▰▰▰▰▰▰▱ `109/120` · **11 seats open**
+> 🔴 `LEC 001` ▰▰▰▰▰▰▰▰ `120/120` · Full
 
 Three things to know:
 

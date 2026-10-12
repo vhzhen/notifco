@@ -11,6 +11,7 @@ import (
 	"github.com/bwmarrin/discordgo"
 
 	"github.com/vhzhen/notifco/internal/notifier"
+	"github.com/vhzhen/notifco/internal/source"
 	"github.com/vhzhen/notifco/internal/store"
 )
 
@@ -26,20 +27,32 @@ const (
 type Transport struct {
 	session *discordgo.Session
 	store   *store.Store
+	namer   TermNamer
 	log     *slog.Logger
 }
 
-// NewTransport builds a Transport.
-func NewTransport(s *discordgo.Session, st *store.Store, log *slog.Logger) *Transport {
+// NewTransport builds a Transport. namer may be nil, in which case term names
+// are derived locally from the term code.
+func NewTransport(s *discordgo.Session, st *store.Store, namer TermNamer, log *slog.Logger) *Transport {
 	if log == nil {
 		log = slog.Default()
 	}
-	return &Transport{session: s, store: st, log: log}
+	return &Transport{session: s, store: st, namer: namer, log: log}
+}
+
+// termName resolves a term for display, never failing.
+func (t *Transport) termName(ctx context.Context, term string) string {
+	if t.namer != nil {
+		if n, err := t.namer.TermName(ctx, source.TermCode(term)); err == nil && strings.TrimSpace(n) != "" {
+			return n
+		}
+	}
+	return source.FallbackTermName(source.TermCode(term))
 }
 
 // Deliver implements notifier.Transport.
 func (t *Transport) Deliver(ctx context.Context, d store.Delivery) (string, error) {
-	content := renderAlert(d)
+	embed := alertEmbed(d, t.termName(ctx, d.TermCode))
 
 	// Try a DM first. A cached channel id skips the create-DM round trip.
 	channelID := d.DMChannelID
@@ -47,7 +60,7 @@ func (t *Transport) Deliver(ctx context.Context, d store.Delivery) (string, erro
 		ch, err := t.session.UserChannelCreate(d.DiscordUserID)
 		if err != nil {
 			if code := discordErrCode(err); code == errCodeCannotDM {
-				return t.fallback(ctx, d, content, err)
+				return t.fallback(ctx, d, err)
 			}
 			if wrapped := classify(err); wrapped != nil {
 				return "", wrapped
@@ -61,12 +74,12 @@ func (t *Transport) Deliver(ctx context.Context, d store.Delivery) (string, erro
 		}
 	}
 
-	_, err := t.session.ChannelMessageSend(channelID, content)
+	_, err := t.session.ChannelMessageSendEmbed(channelID, embed)
 	if err == nil {
 		return "dm", nil
 	}
 	if code := discordErrCode(err); code == errCodeCannotDM {
-		return t.fallback(ctx, d, content, err)
+		return t.fallback(ctx, d, err)
 	}
 	if wrapped := classify(err); wrapped != nil {
 		return "", wrapped
@@ -78,7 +91,7 @@ func (t *Transport) Deliver(ctx context.Context, d store.Delivery) (string, erro
 //
 // The message deliberately does NOT name the course: a user whose DMs are
 // closed should not have their watchlist leaked into a public channel.
-func (t *Transport) fallback(ctx context.Context, d store.Delivery, _ string, dmErr error) (string, error) {
+func (t *Transport) fallback(ctx context.Context, d store.Delivery, dmErr error) (string, error) {
 	if err := t.markBlocked(ctx, d.DiscordUserID); err != nil {
 		t.log.Debug("mark dms blocked failed", "err", err)
 	}
@@ -115,25 +128,6 @@ func (t *Transport) markBlocked(ctx context.Context, discordUserID string) error
 		`UPDATE users SET dms_blocked_at = NOW(), dm_channel_id = NULL WHERE discord_user_id = $1`,
 		discordUserID)
 	return err
-}
-
-// renderAlert builds the DM body.
-func renderAlert(d store.Delivery) string {
-	var sb strings.Builder
-	title := d.CourseTitle
-	if title != "" {
-		title = " — " + title
-	}
-	fmt.Fprintf(&sb, "## Seat open: %s `%s`\n",
-		strings.ToUpper(d.CourseCode), d.SectionName)
-	fmt.Fprintf(&sb, "**%s**%s\n", strings.ToUpper(d.CourseCode), title)
-	fmt.Fprintf(&sb, "- Seats open: **%d**\n", d.SeatsOpen)
-	fmt.Fprintf(&sb, "- Enrollment: %d/%d\n", d.Enrolled, d.Capacity)
-	fmt.Fprintf(&sb, "- Term: %s\n", d.TermCode)
-	fmt.Fprintf(&sb, "- Detected <t:%d:R>\n", d.DetectedAt.Unix())
-	sb.WriteString("\nEnroll on Quest now — seats go fast.\n")
-	sb.WriteString(disclaimer)
-	return clampMessage(sb.String())
 }
 
 // classify maps a Discord error to a notifier error type so the outbox knows

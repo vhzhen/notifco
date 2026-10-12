@@ -380,3 +380,43 @@ func TestSearchWildcardsAreEscaped(t *testing.T) {
 			"input must be escaped", len(hits))
 	}
 }
+
+// TestEnsureCoursePersistsCatalogTitle: ClassSchedules carries no title, so a
+// course fetched on demand used to be stored with an empty one and the UI could
+// only show "MATH 135". The title must come from the catalog and survive later
+// polls, which learn nothing about titles.
+func TestEnsureCoursePersistsCatalogTitle(t *testing.T) {
+	h := newHarness(t)
+	ctx := context.Background()
+
+	// The source's section data has a junk title; the catalog title must win.
+	h.src.Script("math135",
+		sections("math135", 7301, 100, 100),
+		sections("math135", 7301, 100, 100),
+	)
+	if _, err := h.pol.EnsureCourse(ctx, h.term, "math135"); err != nil {
+		t.Fatal(err)
+	}
+	got, err := h.store.SectionsByCourse(ctx, "1269", "math135")
+	if err != nil || len(got) != 1 {
+		t.Fatalf("SectionsByCourse: %v, %d rows", err, len(got))
+	}
+	if got[0].CourseTitle != "Algebra for Honours Mathematics" {
+		t.Fatalf("stored title = %q, want the catalog title", got[0].CourseTitle)
+	}
+
+	// A routine poll upserts sections with no title; it must not blank it.
+	if err := h.store.UpsertSections(ctx, []source.SectionState{{
+		TermCode: "1269", ClassNumber: 7301, CourseCode: "math135", SectionName: "LEC 001",
+		Component: "LEC", Capacity: 100, Enrolled: 99, ObservedAt: time.Now().UTC(),
+	}}); err != nil {
+		t.Fatal(err)
+	}
+	got, _ = h.store.SectionsByCourse(ctx, "1269", "math135")
+	if got[0].CourseTitle != "Algebra for Honours Mathematics" {
+		t.Errorf("a title-less poll blanked the stored title: %q", got[0].CourseTitle)
+	}
+	if got[0].Enrolled != 99 {
+		t.Errorf("the poll's enrolment update was lost: %d", got[0].Enrolled)
+	}
+}

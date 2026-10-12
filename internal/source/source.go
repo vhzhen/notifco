@@ -99,6 +99,34 @@ type CourseSource interface {
 	// CourseSections returns every section of one course, with enrollment.
 	// A course with no sections in that term yields an empty slice, not an error.
 	CourseSections(ctx context.Context, term TermCode, subject, catalog string) ([]SectionState, error)
+
+	// CourseInfo returns one course's catalog entry, including its title.
+	// ClassSchedules carries no title, so this is where titles come from.
+	// Returns (nil, nil) when the course does not exist in that term.
+	CourseInfo(ctx context.Context, term TermCode, subject, catalog string) (*Course, error)
+
+	// TermName returns the human name of a term, e.g. "Fall 2026".
+	TermName(ctx context.Context, term TermCode) (string, error)
+}
+
+// FallbackTermName derives "Fall 2026" from a term code like "1269" without
+// any network call. Used when the API is unreachable, so the UI never shows a
+// bare number. Format: (year-1900)*10 + season, where season is 1 (Winter),
+// 5 (Spring) or 9 (Fall).
+func FallbackTermName(term TermCode) string {
+	s := string(term)
+	if len(s) != 4 {
+		return s
+	}
+	var n int
+	if _, err := fmt.Sscanf(s, "%d", &n); err != nil {
+		return s
+	}
+	season := map[int]string{1: "Winter", 5: "Spring", 9: "Fall"}[n%10]
+	if season == "" {
+		return s
+	}
+	return fmt.Sprintf("%s %d", season, 1900+n/10)
 }
 
 // NormalizeCourseCode turns user input into the canonical internal form:

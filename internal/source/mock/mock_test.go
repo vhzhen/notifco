@@ -155,3 +155,30 @@ func TestUnknownCourseReturnsEmpty(t *testing.T) {
 		t.Errorf("got %d sections for unknown course, want 0", len(got))
 	}
 }
+
+func TestMockServesRealCatalogTitles(t *testing.T) {
+	s, err := New()
+	if err != nil {
+		t.Fatal(err)
+	}
+	ctx := context.Background()
+	for _, tc := range []struct{ subj, cat, want string }{
+		{"MATH", "135", "Algebra for Honours Mathematics"},
+		{"CS", "341", "Algorithms"},
+		{"cs", "341", "Algorithms"}, // case-insensitive
+	} {
+		got, err := s.CourseInfo(ctx, "1269", tc.subj, tc.cat)
+		if err != nil || got == nil {
+			t.Fatalf("%s %s: (%v, %v)", tc.subj, tc.cat, got, err)
+		}
+		if got.Title != tc.want {
+			t.Errorf("%s %s title = %q, want %q", tc.subj, tc.cat, got.Title, tc.want)
+		}
+	}
+	if got, err := s.CourseInfo(ctx, "1269", "ZZZ", "999"); err != nil || got != nil {
+		t.Errorf("unknown course: (%v, %v), want (nil, nil)", got, err)
+	}
+	if n, _ := s.TermName(ctx, "1269"); n != "Fall 2026" {
+		t.Errorf("TermName = %q", n)
+	}
+}

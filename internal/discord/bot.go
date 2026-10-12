@@ -1,4 +1,3 @@
-// Package discord implements the Discord bot: slash commands and delivery.
 package discord
 
 import (
@@ -15,18 +14,17 @@ import (
 	"github.com/vhzhen/notifco/internal/store"
 )
 
-// staleness is the disclaimer appended to every seat figure.
-//
-// The UW OpenData project explicitly asks integrators to inform users of the
-// inherent risks of building on the API (NOTES.md §7), and seat counts are a
-// snapshot that can be minutes old. Quest is authoritative.
-const disclaimer = "-# Seat counts are a best-effort snapshot and may be stale. " +
-	"Verify on Quest before relying on them."
-
 // CourseEnsurer fetches a course's sections on demand, so a user can watch a
 // course nobody has subscribed to yet.
 type CourseEnsurer interface {
 	EnsureCourse(ctx context.Context, term source.TermCode, courseCode string) ([]source.SectionState, error)
+}
+
+// TermNamer resolves a term code to its display name ("1269" -> "Fall 2026").
+// The UW API source implements it with a cache; implementations should fall
+// back to a locally derived name rather than fail.
+type TermNamer interface {
+	TermName(ctx context.Context, term source.TermCode) (string, error)
 }
 
 // Options configures the Bot.
@@ -36,6 +34,7 @@ type Options struct {
 	GuildID string // empty = register commands globally
 	Store   *store.Store
 	Ensurer CourseEnsurer
+	Namer   TermNamer
 	Logger  *slog.Logger
 	// Term is the term commands operate on.
 	Term source.TermCode
@@ -73,6 +72,17 @@ func New(opts Options) (*Bot, error) {
 // Session exposes the underlying session, used by the delivery transport.
 func (b *Bot) Session() *discordgo.Session { return b.session }
 
+// termName resolves a term to its display name, never failing: a bare
+// "1269" in the UI is worse than a locally derived "Fall 2026".
+func (b *Bot) termName(ctx context.Context, term source.TermCode) string {
+	if b.opts.Namer != nil {
+		if n, err := b.opts.Namer.TermName(ctx, term); err == nil && strings.TrimSpace(n) != "" {
+			return n
+		}
+	}
+	return source.FallbackTermName(term)
+}
+
 // commands is the slash command set.
 func commands() []*discordgo.ApplicationCommand {
 	return []*discordgo.ApplicationCommand{
@@ -81,7 +91,7 @@ func commands() []*discordgo.ApplicationCommand {
 			Description: "Search UW courses and see live seat counts",
 			Options: []*discordgo.ApplicationCommandOption{{
 				Name:         "code",
-				Description:  "Course code, e.g. CS 341",
+				Description:  "Course code or title, e.g. CS 341",
 				Type:         discordgo.ApplicationCommandOptionString,
 				Required:     true,
 				Autocomplete: true,
@@ -214,7 +224,27 @@ func (b *Bot) handleInteraction(s *discordgo.Session, i *discordgo.InteractionCr
 		b.handleCommand(ctx, s, i)
 	case discordgo.InteractionApplicationCommandAutocomplete:
 		b.handleAutocomplete(ctx, s, i)
+	case discordgo.InteractionMessageComponent:
+		b.handleComponent(ctx, s, i)
 	}
+}
+
+// safely runs fn, converting a panic into an error. discordgo dispatches each
+// interaction on its own goroutine, so an unrecovered panic would take the
+// whole process down.
+func (b *Bot) safely(what string, fn func() (view, error)) (v view, err error) {
+	defer func() {
+		if r := recover(); r != nil {
+			b.log.Error("panic handling interaction", "what", what, "panic", r)
+			err = errors.New("internal error")
+		}
+	}()
+	return fn()
+}
+
+func errorView(err error) view {
+	return noticeView(colorFull, "Something went wrong",
+		"Try again in a moment. If it keeps happening, the UW API may be down.\n\n*"+truncateRunes(err.Error(), 200)+"*")
 }
 
 func (b *Bot) handleCommand(ctx context.Context, s *discordgo.Session, i *discordgo.InteractionCreate) {
@@ -230,43 +260,82 @@ func (b *Bot) handleCommand(ctx context.Context, s *discordgo.Session, i *discor
 		return
 	}
 
-	var msg string
-	var err error
-	// discordgo dispatches each interaction on its own goroutine, so an
-	// unrecovered panic here would take the whole process down.
-	func() {
-		defer func() {
-			if r := recover(); r != nil {
-				b.log.Error("panic handling command", "command", data.Name, "panic", r)
-				err = fmt.Errorf("internal error")
-			}
-		}()
+	v, err := b.safely(data.Name, func() (view, error) {
 		switch data.Name {
 		case "search":
-			msg, err = b.cmdSearch(ctx, data)
+			return b.cmdSearch(ctx, data)
 		case "watch":
-			msg, err = b.cmdWatch(ctx, i, data)
+			return b.cmdWatch(ctx, i, data)
 		case "unwatch":
-			msg, err = b.cmdUnwatch(ctx, i, data)
+			return b.cmdUnwatch(ctx, i, data)
 		case "watchlist":
-			msg, err = b.cmdWatchlist(ctx, i)
+			return b.cmdWatchlist(ctx, i)
 		default:
-			msg = "Unknown command."
+			return noticeView(colorWarn, "Unknown command", "I don't know that one."), nil
 		}
-	}()
+	})
 	if err != nil {
 		b.log.Error("command failed", "command", data.Name, "err", err)
-		msg = "Something went wrong: " + err.Error()
+		v = errorView(err)
 	}
-	if msg == "" {
-		msg = "No response."
-	}
-	msg = clampMessage(msg)
 
+	// Components must be sent as an explicit empty slice to clear them; a nil
+	// pointer would leave the previous message's buttons in place.
+	embeds := []*discordgo.MessageEmbed{v.embed}
+	comps := v.components
+	if comps == nil {
+		comps = []discordgo.MessageComponent{}
+	}
 	if _, err := s.InteractionResponseEdit(i.Interaction, &discordgo.WebhookEdit{
-		Content: &msg,
+		Embeds:     &embeds,
+		Components: &comps,
 	}); err != nil {
 		b.log.Error("respond failed", "command", data.Name, "err", err)
+	}
+}
+
+// handleComponent serves pager button clicks by re-rendering the requested page
+// in place. The target page is carried in the button's custom ID, so no
+// per-message state is stored anywhere.
+func (b *Bot) handleComponent(ctx context.Context, s *discordgo.Session, i *discordgo.InteractionCreate) {
+	id := i.MessageComponentData().CustomID
+	kind, key, page, ok := parsePagerID(id)
+	if !ok {
+		// The disabled page indicator, or an ID from a future version. Just
+		// acknowledge so Discord does not show "interaction failed".
+		_ = s.InteractionRespond(i.Interaction, &discordgo.InteractionResponse{
+			Type: discordgo.InteractionResponseDeferredMessageUpdate,
+		})
+		return
+	}
+
+	v, err := b.safely("pager:"+kind, func() (view, error) {
+		switch kind {
+		case "s":
+			return b.searchPage(ctx, key, page)
+		case "w":
+			return b.watchlistPage(ctx, interactionUserID(i), page)
+		default:
+			return view{}, fmt.Errorf("unknown pager %q", kind)
+		}
+	})
+	if err != nil {
+		b.log.Error("pager failed", "id", id, "err", err)
+		v = errorView(err)
+	}
+
+	comps := v.components
+	if comps == nil {
+		comps = []discordgo.MessageComponent{}
+	}
+	if err := s.InteractionRespond(i.Interaction, &discordgo.InteractionResponse{
+		Type: discordgo.InteractionResponseUpdateMessage,
+		Data: &discordgo.InteractionResponseData{
+			Embeds:     []*discordgo.MessageEmbed{v.embed},
+			Components: comps,
+		},
+	}); err != nil {
+		b.log.Error("pager respond failed", "id", id, "err", err)
 	}
 }
 
@@ -279,10 +348,13 @@ func optString(opts []*discordgo.ApplicationCommandInteractionDataOption, name s
 	return ""
 }
 
-func (b *Bot) cmdSearch(ctx context.Context, data discordgo.ApplicationCommandInteractionData) (string, error) {
+// --- /search ----------------------------------------------------------------
+
+func (b *Bot) cmdSearch(ctx context.Context, data discordgo.ApplicationCommandInteractionData) (view, error) {
 	query := optString(data.Options, "code")
 	if strings.TrimSpace(query) == "" {
-		return "Give me a course code, e.g. `/search CS 341`.", nil
+		return noticeView(colorWarn, "What should I search for?",
+			"Give me a course code, e.g. `/search CS 341`."), nil
 	}
 
 	// If the query looks like a full course code, fetch it on demand so search
@@ -294,70 +366,50 @@ func (b *Bot) cmdSearch(ctx context.Context, data discordgo.ApplicationCommandIn
 	}
 
 	code := source.NormalizeCourseCode(query)
-	sections, err := b.opts.Store.SectionsByCourse(ctx, string(b.opts.Term), code)
-	if err != nil {
-		return "", err
-	}
-	if len(sections) > 0 {
-		return renderSections(code, sections), nil
+	if v, err := b.searchPage(ctx, code, 0); err != nil {
+		return view{}, err
+	} else if v.embed != nil {
+		return v, nil
 	}
 
 	hits, err := b.opts.Store.SearchCourses(ctx, string(b.opts.Term), query, 10)
 	if err != nil {
-		return "", err
+		return view{}, err
 	}
 	if len(hits) == 0 {
-		return fmt.Sprintf("No course matched %q for term %s.", query, b.opts.Term), nil
+		return noticeView(colorWarn, "No course found",
+			fmt.Sprintf("Nothing matched “%s” for %s.\n\nCheck the code, e.g. `/search MATH 135`.",
+				truncateRunes(query, 60), b.termName(ctx, b.opts.Term))), nil
 	}
-	var sb strings.Builder
-	fmt.Fprintf(&sb, "**Courses matching %q**\n", query)
-	for _, h := range hits {
-		fmt.Fprintf(&sb, "- `%s` %s — %d section(s), %d with seats\n",
-			strings.ToUpper(h.CourseCode), h.CourseTitle, h.Sections, h.OpenSections)
-	}
-	sb.WriteString("\nUse `/search <exact code>` for section detail.\n")
-	sb.WriteString(disclaimer)
-	return sb.String(), nil
+	return matchesView(query, b.termName(ctx, b.opts.Term), hits), nil
 }
 
-func renderSections(code string, sections []store.Section) string {
-	var sb strings.Builder
-	title := sections[0].CourseTitle
-	if title != "" {
-		fmt.Fprintf(&sb, "**%s — %s**\n", strings.ToUpper(code), title)
-	} else {
-		fmt.Fprintf(&sb, "**%s**\n", strings.ToUpper(code))
+// searchPage renders one page of a course's sections. It returns a zero view
+// (nil embed) when the course has no sections, so callers can fall back to a
+// text search.
+func (b *Bot) searchPage(ctx context.Context, code string, page int) (view, error) {
+	code = source.NormalizeCourseCode(code)
+	sections, err := b.opts.Store.SectionsByCourse(ctx, string(b.opts.Term), code)
+	if err != nil {
+		return view{}, err
 	}
-	var newest time.Time
-	for _, s := range sections {
-		state := "FULL"
-		if s.SeatsOpen() > 0 {
-			state = fmt.Sprintf("%d seat(s) open", s.SeatsOpen())
-		}
-		online := ""
-		if s.IsOnline {
-			online = " · online"
-		}
-		fmt.Fprintf(&sb, "- `%s` %d/%d — %s%s\n",
-			s.SectionName, s.Enrolled, s.Capacity, state, online)
-		if s.ObservedAt.After(newest) {
-			newest = s.ObservedAt
-		}
+	if len(sections) == 0 {
+		return view{}, nil
 	}
-	fmt.Fprintf(&sb, "\nAs of <t:%d:R>. Watch one with `/watch %s <section>`.\n",
-		newest.Unix(), strings.ToUpper(code))
-	sb.WriteString(disclaimer)
-	return sb.String()
+	return searchView(code, b.termName(ctx, b.opts.Term), sections, page), nil
 }
+
+// --- /watch -----------------------------------------------------------------
 
 func (b *Bot) cmdWatch(
 	ctx context.Context, i *discordgo.InteractionCreate, data discordgo.ApplicationCommandInteractionData,
-) (string, error) {
+) (view, error) {
 	code := optString(data.Options, "code")
 	sectionInput := optString(data.Options, "section")
 
 	if _, _, err := source.SplitCourseCode(code); err != nil {
-		return fmt.Sprintf("%q is not a course code. Try `CS 341`.", code), nil
+		return noticeView(colorWarn, "That doesn't look like a course code",
+			fmt.Sprintf("“%s” isn't a course code. Try `CS 341`.", truncateRunes(code, 60))), nil
 	}
 
 	// Fetch on demand so a brand-new course can be watched.
@@ -368,18 +420,19 @@ func (b *Bot) cmdWatch(
 	}
 
 	norm := source.NormalizeCourseCode(code)
+	termName := b.termName(ctx, b.opts.Term)
 	sections, err := b.opts.Store.SectionsByCourse(ctx, string(b.opts.Term), norm)
 	if err != nil {
-		return "", err
+		return view{}, err
 	}
 	if len(sections) == 0 {
-		return fmt.Sprintf("No sections found for `%s` in term %s.",
-			strings.ToUpper(norm), b.opts.Term), nil
+		return noticeView(colorWarn, "No sections found",
+			fmt.Sprintf("`%s` has no scheduled sections in %s.", courseLabel(norm), termName)), nil
 	}
 
 	userID, err := b.opts.Store.UpsertUser(ctx, interactionUserID(i))
 	if err != nil {
-		return "", err
+		return view{}, err
 	}
 	// Remember where to ping if DMs turn out to be closed.
 	if i.GuildID != "" && i.ChannelID != "" {
@@ -394,10 +447,11 @@ func (b *Bot) cmdWatch(
 		sec, err := b.opts.Store.FindSection(ctx, string(b.opts.Term), norm, sectionInput)
 		if err != nil {
 			if errors.Is(err, store.ErrNotFound) {
-				return fmt.Sprintf("No section %q in `%s`. Known: %s",
-					sectionInput, strings.ToUpper(norm), sectionNames(sections)), nil
+				return noticeView(colorWarn, "No such section",
+					fmt.Sprintf("`%s` has no section “%s”.\n\n**Sections:** %s",
+						courseLabel(norm), truncateRunes(sectionInput, 40), sectionNames(sections))), nil
 			}
-			return "", err
+			return view{}, err
 		}
 		targets = []store.Section{*sec}
 	}
@@ -406,7 +460,7 @@ func (b *Bot) cmdWatch(
 	for _, t := range targets {
 		isNew, err := b.opts.Store.Subscribe(ctx, userID, t.ID)
 		if err != nil {
-			return "", err
+			return view{}, err
 		}
 		if isNew {
 			added++
@@ -414,119 +468,97 @@ func (b *Bot) cmdWatch(
 			already++
 		}
 	}
-
-	var sb strings.Builder
-	if added > 0 {
-		fmt.Fprintf(&sb, "Watching **%d** section(s) of `%s`.\n", added, strings.ToUpper(norm))
-	}
-	if already > 0 {
-		fmt.Fprintf(&sb, "Already watching %d section(s).\n", already)
-	}
-	for _, t := range targets {
-		state := "FULL — you will be DMed when a seat opens"
-		if t.SeatsOpen() > 0 {
-			state = fmt.Sprintf("%d seat(s) open right now", t.SeatsOpen())
-		}
-		fmt.Fprintf(&sb, "- `%s` %d/%d — %s\n", t.SectionName, t.Enrolled, t.Capacity, state)
-	}
-	sb.WriteString("\nI only alert on a full → open transition, so an already-open " +
-		"section will not notify until it fills and frees again.\n")
-	sb.WriteString(disclaimer)
-	return sb.String(), nil
+	return watchConfirmView(norm, sections[0].CourseTitle, termName, targets, added, already), nil
 }
 
 func sectionNames(sections []store.Section) string {
 	names := make([]string, 0, len(sections))
-	for _, s := range sections {
+	for _, s := range sortSections(sections) {
 		names = append(names, "`"+s.SectionName+"`")
 	}
-	return strings.Join(names, ", ")
+	return truncateRunes(strings.Join(names, ", "), 900)
 }
+
+// --- /unwatch ---------------------------------------------------------------
 
 func (b *Bot) cmdUnwatch(
 	ctx context.Context, i *discordgo.InteractionCreate, data discordgo.ApplicationCommandInteractionData,
-) (string, error) {
+) (view, error) {
 	code := optString(data.Options, "code")
 	sectionInput := optString(data.Options, "section")
 	norm := source.NormalizeCourseCode(code)
+	label := courseLabel(norm)
 
 	userID, err := b.opts.Store.UpsertUser(ctx, interactionUserID(i))
 	if err != nil {
-		return "", err
+		return view{}, err
 	}
 
 	if strings.TrimSpace(sectionInput) == "" {
 		n, err := b.opts.Store.UnsubscribeCourse(ctx, userID, string(b.opts.Term), norm)
 		if err != nil {
-			return "", err
+			return view{}, err
 		}
 		if n == 0 {
-			return fmt.Sprintf("You were not watching any section of `%s`.",
-				strings.ToUpper(norm)), nil
+			return noticeView(colorWarn, "Nothing to remove",
+				fmt.Sprintf("You weren't watching any section of `%s`.", label)), nil
 		}
-		return fmt.Sprintf("Stopped watching **%d** section(s) of `%s`.",
-			n, strings.ToUpper(norm)), nil
+		return noticeView(colorNeutral, "🛑 Stopped watching "+label,
+			fmt.Sprintf("Removed **%s** of `%s`. Any alert not yet sent has been cancelled.",
+				plural(int(n), "section"), label)), nil
 	}
 
 	sec, err := b.opts.Store.FindSection(ctx, string(b.opts.Term), norm, sectionInput)
 	if err != nil {
 		if errors.Is(err, store.ErrNotFound) {
-			return fmt.Sprintf("No section %q in `%s`.", sectionInput, strings.ToUpper(norm)), nil
+			return noticeView(colorWarn, "No such section",
+				fmt.Sprintf("`%s` has no section “%s”.", label, truncateRunes(sectionInput, 40))), nil
 		}
-		return "", err
+		return view{}, err
 	}
 	ok, err := b.opts.Store.Unsubscribe(ctx, userID, sec.ID)
 	if err != nil {
-		return "", err
+		return view{}, err
 	}
 	if !ok {
-		return fmt.Sprintf("You were not watching `%s` `%s`.",
-			strings.ToUpper(norm), sec.SectionName), nil
+		return noticeView(colorWarn, "Nothing to remove",
+			fmt.Sprintf("You weren't watching `%s` `%s`.", label, sec.SectionName)), nil
 	}
-	return fmt.Sprintf("Stopped watching `%s` `%s`.",
-		strings.ToUpper(norm), sec.SectionName), nil
+	return noticeView(colorNeutral, "🛑 Stopped watching "+label,
+		fmt.Sprintf("Removed `%s`. Any alert not yet sent has been cancelled.", sec.SectionName)), nil
 }
 
-func (b *Bot) cmdWatchlist(ctx context.Context, i *discordgo.InteractionCreate) (string, error) {
-	userID, err := b.opts.Store.UpsertUser(ctx, interactionUserID(i))
+// --- /watchlist -------------------------------------------------------------
+
+func (b *Bot) cmdWatchlist(ctx context.Context, i *discordgo.InteractionCreate) (view, error) {
+	return b.watchlistPage(ctx, interactionUserID(i), 0)
+}
+
+func (b *Bot) watchlistPage(ctx context.Context, discordUserID string, page int) (view, error) {
+	userID, err := b.opts.Store.UpsertUser(ctx, discordUserID)
 	if err != nil {
-		return "", err
+		return view{}, err
 	}
 	items, err := b.opts.Store.Watchlist(ctx, userID)
 	if err != nil {
-		return "", err
-	}
-	if len(items) == 0 {
-		return "You are not watching anything. Add one with `/watch CS 341 LEC 001`.", nil
+		return view{}, err
 	}
 
-	var sb strings.Builder
-	fmt.Fprintf(&sb, "**Your watchlist** (%d section(s))\n", len(items))
-	var newest time.Time
-	// Cap the listing so a heavy watcher's reply still fits Discord's limit.
-	const maxListed = 40
-	for idx, it := range items {
-		s := it.Section
-		if idx == maxListed {
-			fmt.Fprintf(&sb, "- … and %d more\n", len(items)-maxListed)
-			break
-		}
-		state := "FULL"
-		if s.SeatsOpen() > 0 {
-			state = fmt.Sprintf("%d open", s.SeatsOpen())
-		}
-		fmt.Fprintf(&sb, "- `%s` `%s` %d/%d — %s\n",
-			strings.ToUpper(s.CourseCode), s.SectionName, s.Enrolled, s.Capacity, state)
-		if s.ObservedAt.After(newest) {
-			newest = s.ObservedAt
+	// Resolve each distinct term once. Normally that is a single term, but a
+	// watch made before a term rollover can linger.
+	names := make(map[string]string)
+	for _, it := range items {
+		t := it.Section.TermCode
+		if _, done := names[t]; !done {
+			names[t] = b.termName(ctx, source.TermCode(t))
 		}
 	}
-	fmt.Fprintf(&sb, "\nAs of <t:%d:R>.\n", newest.Unix())
-	sb.WriteString(disclaimer)
-	return sb.String(), nil
+	return watchlistView(items, names, page), nil
 }
 
-// handleAutocomplete suggests course codes and section names.
+// --- autocomplete -----------------------------------------------------------
+
+// handleAutocomplete suggests course codes (with titles) and section names.
 func (b *Bot) handleAutocomplete(ctx context.Context, s *discordgo.Session, i *discordgo.InteractionCreate) {
 	data := i.ApplicationCommandData()
 	var choices []*discordgo.ApplicationCommandOptionChoice
@@ -545,8 +577,14 @@ func (b *Bot) handleAutocomplete(ctx context.Context, s *discordgo.Session, i *d
 	case "code":
 		if hits, err := b.opts.Store.SearchCourses(ctx, string(b.opts.Term), codeVal, 25); err == nil {
 			for _, h := range hits {
+				label := courseLabel(h.CourseCode)
+				if h.CourseTitle != "" {
+					label += " - " + h.CourseTitle
+				}
 				choices = append(choices, &discordgo.ApplicationCommandOptionChoice{
-					Name:  strings.ToUpper(h.CourseCode),
+					// The shown name carries the title; the submitted value
+					// stays the bare code so the handlers keep working.
+					Name:  truncateRunes(label, maxChoiceName),
 					Value: strings.ToUpper(h.CourseCode),
 				})
 			}
@@ -554,10 +592,13 @@ func (b *Bot) handleAutocomplete(ctx context.Context, s *discordgo.Session, i *d
 	case "section":
 		norm := source.NormalizeCourseCode(codeVal)
 		if sections, err := b.opts.Store.SectionsByCourse(ctx, string(b.opts.Term), norm); err == nil {
-			for _, sec := range sections {
-				label := fmt.Sprintf("%s (%d/%d)", sec.SectionName, sec.Enrolled, sec.Capacity)
+			for _, sec := range sortSections(sections) {
+				icon := "🔴"
+				if sec.SeatsOpen() > 0 {
+					icon = "🟢"
+				}
 				choices = append(choices, &discordgo.ApplicationCommandOptionChoice{
-					Name:  label,
+					Name:  truncateRunes(fmt.Sprintf("%s %s (%d/%d)", icon, sec.SectionName, sec.Enrolled, sec.Capacity), maxChoiceName),
 					Value: sec.SectionName,
 				})
 				if len(choices) >= 25 {
@@ -573,29 +614,6 @@ func (b *Bot) handleAutocomplete(ctx context.Context, s *discordgo.Session, i *d
 	}); err != nil {
 		b.log.Debug("autocomplete respond failed", "err", err)
 	}
-}
-
-// discordMaxMessage is Discord's hard limit on message content length.
-// Exceeding it makes the API reject the whole message, so every reply this
-// package builds is clamped.
-const discordMaxMessage = 2000
-
-// clampMessage truncates to Discord's limit on a line boundary where possible.
-func clampMessage(s string) string {
-	if len(s) <= discordMaxMessage {
-		return s
-	}
-	const notice = "\n… truncated. Narrow the query or use `/watchlist` for your own watches."
-	cut := discordMaxMessage - len(notice)
-	if cut < 0 {
-		return s[:discordMaxMessage]
-	}
-	trimmed := s[:cut]
-	// Prefer cutting at the last newline so a line is not left half-rendered.
-	if idx := strings.LastIndexByte(trimmed, '\n'); idx > cut/2 {
-		trimmed = trimmed[:idx]
-	}
-	return trimmed + notice
 }
 
 func interactionUserID(i *discordgo.InteractionCreate) string {
