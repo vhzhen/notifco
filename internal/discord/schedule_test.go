@@ -12,6 +12,9 @@ import (
 	"github.com/vhzhen/notifco/internal/store"
 )
 
+// indent is the "tab" before the arrow: four no-break spaces (U+00A0).
+const indent = "\u00a0\u00a0\u00a0\u00a0"
+
 func tsec(name, comp string, class, enrolled, capacity int, ms ...source.Meeting) store.Section {
 	return store.Section{
 		TermCode: "1269", CourseCode: "cs341", CourseTitle: "Algorithms",
@@ -98,7 +101,7 @@ func TestRealCS341MatchesTheFixture(t *testing.T) {
 //   - 8:30 AM - 9:20 AM · Monday, Wednesday
 func TestScheduleLineFormat(t *testing.T) {
 	got := meetingLine(mt("YNYNNNN", "08:30", "09:20"))
-	want := "• 8:30 AM - 9:20 AM · Monday, Wednesday"
+	want := indent + "↳ 8:30 AM - 9:20 AM · Monday, Wednesday"
 	if got != want {
 		t.Fatalf("got  %q\nwant %q", got, want)
 	}
@@ -123,18 +126,18 @@ func TestDaysInWords(t *testing.T) {
 
 func TestMeetingLineWithoutDaysHasNoDanglingSeparator(t *testing.T) {
 	got := meetingLine(mt("NNNNNNN", "08:30", "09:20"))
-	if got != "• 8:30 AM - 9:20 AM" {
+	if got != indent+"↳ 8:30 AM - 9:20 AM" {
 		t.Errorf("got %q, want the time alone", got)
 	}
 }
 
 func TestTimeUsesTwelveHourClockWithoutPadding(t *testing.T) {
 	for _, tc := range []struct{ start, end, want string }{
-		{"08:30", "09:50", "• 8:30 AM - 9:50 AM · Monday"},
-		{"10:30", "11:20", "• 10:30 AM - 11:20 AM · Monday"},
-		{"11:30", "12:50", "• 11:30 AM - 12:50 PM · Monday"},
-		{"13:00", "14:20", "• 1:00 PM - 2:20 PM · Monday"},
-		{"18:00", "19:50", "• 6:00 PM - 7:50 PM · Monday"},
+		{"08:30", "09:50", indent + "↳ 8:30 AM - 9:50 AM · Monday"},
+		{"10:30", "11:20", indent + "↳ 10:30 AM - 11:20 AM · Monday"},
+		{"11:30", "12:50", indent + "↳ 11:30 AM - 12:50 PM · Monday"},
+		{"13:00", "14:20", indent + "↳ 1:00 PM - 2:20 PM · Monday"},
+		{"18:00", "19:50", indent + "↳ 6:00 PM - 7:50 PM · Monday"},
 	} {
 		if got := meetingLine(mt("YNNNNNN", tc.start, tc.end)); got != tc.want {
 			t.Errorf("%s-%s: got %q, want %q", tc.start, tc.end, got, tc.want)
@@ -152,26 +155,130 @@ func TestScheduleSitsDirectlyUnderTheSectionLine(t *testing.T) {
 	if len(lines) != 2 {
 		t.Fatalf("got %d lines, want the section line plus one bullet:\n%s", len(lines), searchRow(s))
 	}
-	if !strings.HasPrefix(lines[0], "`LEC 001`") || !strings.Contains(lines[0], "`76/92`") || !strings.Contains(lines[0], "16 seats open") {
-		t.Errorf("first line is not the usual section line: %q", lines[0])
+	if lines[0] != "`LEC 001` ▰▰▰▰▰▰▱▱ `76/92` · `5986`" {
+		t.Errorf("section line = %q", lines[0])
 	}
-	if lines[1] != "• 8:30 AM - 9:20 AM · Monday, Wednesday" {
+	if lines[1] != indent+"↳ 8:30 AM - 9:20 AM · Monday, Wednesday" {
 		t.Errorf("second line = %q", lines[1])
 	}
 }
 
-// TestSearchRowKeepsTheEarlierLook: the section line must be unchanged from the
-// layout the user asked to go back to (fill bar, counts, seats text).
-func TestSearchRowKeepsTheEarlierLook(t *testing.T) {
+// TestSearchSectionLineShowsTheClassNumberNotSeatsText: the number replaces the
+// "N seats open" text, and everything else on the line is as before.
+func TestSearchSectionLineShowsTheClassNumberNotSeatsText(t *testing.T) {
 	s := tsec("LEC 001", "LEC", 5986, 76, 92, mt("YNYNNNN", "08:30", "09:20"))
-	first := strings.Split(searchRow(s), "\n")[0]
-	if first != sectionRow(s) {
-		t.Errorf("section line changed:\n got  %q\n want %q", first, sectionRow(s))
+	line := strings.Split(searchRow(s), "\n")[0]
+
+	if !strings.Contains(line, "`5986`") {
+		t.Errorf("class number missing: %q", line)
 	}
-	for _, want := range []string{"▰", "▱", "`76/92`", "**16 seats open**"} {
-		if !strings.Contains(first, want) {
-			t.Errorf("section line lost %q: %q", want, first)
+	if strings.Contains(line, "seat") {
+		t.Errorf("the seats text was meant to be replaced: %q", line)
+	}
+	for _, want := range []string{"`LEC 001`", "▰", "▱", "`76/92`"} {
+		if !strings.Contains(line, want) {
+			t.Errorf("section line lost %q: %q", want, line)
 		}
+	}
+	// It sits where the seats text was: after the counts, behind the separator.
+	if i, j := strings.Index(line, "`76/92`"), strings.Index(line, "`5986`"); !(i >= 0 && j > i) || !strings.Contains(line[i:j], " · ") {
+		t.Errorf("class number is not after the counts behind a separator: %q", line)
+	}
+}
+
+// TestFullSectionStillSaysFullAndHasItsNumber: the class number matters most on
+// a full section (it is the one people watch), so it must never be dropped.
+func TestFullSectionStillSaysFullAndHasItsNumber(t *testing.T) {
+	full := searchSectionLine(tsec("LEC 001", "LEC", 6003, 100, 100))
+	if !strings.Contains(full, "`6003`") {
+		t.Errorf("a full section lost its class number: %q", full)
+	}
+	if !strings.HasSuffix(full, " · Full") {
+		t.Errorf("a full section should still say Full: %q", full)
+	}
+	open := searchSectionLine(tsec("LEC 002", "LEC", 6546, 99, 100))
+	if strings.Contains(open, "Full") {
+		t.Errorf("an open section must not say Full: %q", open)
+	}
+}
+
+func TestSearchSectionLineWithoutAClassNumber(t *testing.T) {
+	// A zero class number means the data is missing; showing `0` would be a lie.
+	line := searchSectionLine(tsec("LEC 001", "LEC", 0, 5, 10))
+	if strings.Contains(line, "`0`") {
+		t.Errorf("missing class number rendered as 0: %q", line)
+	}
+}
+
+func TestSearchSectionLineKeepsOnlineMarker(t *testing.T) {
+	s := tsec("LEC 081", "LEC", 7001, 5, 10)
+	s.IsOnline = true
+	if line := searchSectionLine(s); !strings.HasSuffix(line, "· 🌐 online") {
+		t.Errorf("online marker lost: %q", line)
+	}
+}
+
+// --- the indented arrow ------------------------------------------------------------
+
+// TestArrowIsIndentedByATab pins the requested marker: an arrow, preceded by a
+// tab-width of space, and nothing like the old bullet.
+func TestArrowIsIndentedByATab(t *testing.T) {
+	line := meetingLine(mt("YNYNNNN", "08:30", "09:20"))
+	if !strings.HasPrefix(line, indent+"↳ ") {
+		t.Fatalf("line does not start with an indent then the arrow: %q", line)
+	}
+	if got := strings.Count(line[:strings.Index(line, "↳")], "\u00a0"); got != 4 {
+		t.Errorf("indent is %d no-break spaces, want 4 (one tab)", got)
+	}
+	if strings.Contains(line, "•") {
+		t.Errorf("the old bullet is still present: %q", line)
+	}
+}
+
+// TestIndentUsesNoBreakSpaces pins the design choice only. It does NOT show the
+// indent survives in Discord, which cannot be tested from here. No-break spaces
+// resist HTML whitespace collapsing, but they are still Unicode whitespace, so a
+// renderer that trims strings would strip them as readily as ordinary spaces.
+// (An earlier version of this test asserted otherwise and failed: Go's
+// TrimSpace removes U+00A0.)
+func TestIndentUsesNoBreakSpaces(t *testing.T) {
+	line := meetingLine(mt("YNYNNNN", "08:30", "09:20"))
+	lead := line[:strings.Index(line, "↳")]
+	if strings.TrimLeft(lead, "\u00a0") != "" {
+		t.Errorf("indent contains something other than no-break spaces: %q", lead)
+	}
+	if n := len([]rune(lead)); n != 4 {
+		t.Errorf("indent is %d characters, want 4 (one tab)", n)
+	}
+}
+
+func TestSearchViewHasNoSeatsTextAndNoBullet(t *testing.T) {
+	d := searchView("cs341", "Fall 2026", realCS341(), 0).embed.Description
+	for _, banned := range []string{"seats open", "seat open", "•"} {
+		if strings.Contains(d, banned) {
+			t.Errorf("search output still contains %q:\n%s", banned, d)
+		}
+	}
+	if n := strings.Count(d, "↳"); n != len(realCS341()) {
+		t.Errorf("%d arrows, want one per section (%d)", n, len(realCS341()))
+	}
+}
+
+// TestWatchlistAndWatchRowsAreUnchanged: only /search got the class number, so
+// the other views keep the seats text, which is their only availability cue.
+func TestWatchlistAndWatchRowsAreUnchanged(t *testing.T) {
+	s := sec("LEC", "LEC 002", 99, 100)
+	s.ClassNumber = 6546
+	if row := sectionRow(s); !strings.Contains(row, "1 seat open") || strings.Contains(row, "6546") {
+		t.Errorf("sectionRow changed: %q", row)
+	}
+	wl := watchlistView([]store.WatchItem{{Section: s}}, map[string]string{"1269": "Fall 2026"}, 0).embed.Description
+	if !strings.Contains(wl, "1 seat open") {
+		t.Errorf("watchlist lost its seats text:\n%s", wl)
+	}
+	wc := watchConfirmView("math135", "Algebra", "Fall 2026", []store.Section{s}, 1, 0).embed.Description
+	if !strings.Contains(wc, "1 seat open") {
+		t.Errorf("watch confirmation lost its seats text:\n%s", wc)
 	}
 }
 
@@ -196,10 +303,10 @@ func TestNoTimeSaysTBAOrOnline(t *testing.T) {
 	online := tsec("LEC 081", "LEC", 1002, 5, 10)
 	online.IsOnline = true
 
-	if got := scheduleLines(tba); len(got) != 1 || got[0] != "• Time TBA" {
+	if got := scheduleLines(tba); len(got) != 1 || got[0] != indent+"↳ Time TBA" {
 		t.Errorf("TBA section: %q", got)
 	}
-	if got := scheduleLines(online); len(got) != 1 || got[0] != "• Online" {
+	if got := scheduleLines(online); len(got) != 1 || got[0] != indent+"↳ Online" {
 		t.Errorf("online section: %q", got)
 	}
 }
@@ -214,9 +321,9 @@ func TestSeveralTimesGetOneBulletEach(t *testing.T) {
 	)
 	got := scheduleLines(s)
 	want := []string{
-		"• 9:30 AM - 10:20 AM · Monday, Thursday",
-		"• 12:30 PM - 1:20 PM · Tuesday",
-		"• 1:30 PM - 2:20 PM · Tuesday",
+		indent + "↳ 9:30 AM - 10:20 AM · Monday, Thursday",
+		indent + "↳ 12:30 PM - 1:20 PM · Tuesday",
+		indent + "↳ 1:30 PM - 2:20 PM · Tuesday",
 	}
 	if !reflect.DeepEqual(got, want) {
 		t.Fatalf("got:\n%s\nwant:\n%s", strings.Join(got, "\n"), strings.Join(want, "\n"))
@@ -232,7 +339,7 @@ func TestManyTimesAreCapped(t *testing.T) {
 	if len(got) != maxSlotsShown+1 {
 		t.Fatalf("8 times -> %d lines, want %d", len(got), maxSlotsShown+1)
 	}
-	if got[len(got)-1] != "• +4 more times" {
+	if got[len(got)-1] != indent+"↳ +4 more times" {
 		t.Errorf("last line = %q, want a count of what was hidden", got[len(got)-1])
 	}
 }
@@ -283,10 +390,10 @@ func TestSchedulesStayWithinDiscordLimits(t *testing.T) {
 // response, so the expected strings are real UW data and not my own typing.
 func TestRealCS341ScheduleLines(t *testing.T) {
 	want := map[string]string{
-		"LEC 001": "• 1:00 PM - 2:20 PM · Tuesday, Thursday",
-		"LEC 002": "• 11:30 AM - 12:50 PM · Tuesday, Thursday",
-		"LAB 101": "• 10:30 AM - 11:20 AM · Friday",
-		"TST 201": "• 6:00 PM - 7:50 PM · Monday",
+		"LEC 001": indent + "↳ 1:00 PM - 2:20 PM · Tuesday, Thursday",
+		"LEC 002": indent + "↳ 11:30 AM - 12:50 PM · Tuesday, Thursday",
+		"LAB 101": indent + "↳ 10:30 AM - 11:20 AM · Friday",
+		"TST 201": indent + "↳ 6:00 PM - 7:50 PM · Monday",
 	}
 	for _, s := range realCS341() {
 		w, ok := want[s.SectionName]
@@ -307,10 +414,10 @@ func TestSearchViewShowsAScheduleUnderEverySection(t *testing.T) {
 	lines := strings.Split(d, "\n")
 
 	want := map[string]string{
-		"`LEC 001`": "• 1:00 PM - 2:20 PM · Tuesday, Thursday",
-		"`LEC 003`": "• 10:00 AM - 11:20 AM · Tuesday, Thursday",
-		"`LAB 102`": "• 11:30 AM - 12:20 PM · Friday",
-		"`TST 201`": "• 6:00 PM - 7:50 PM · Monday",
+		"`LEC 001`": indent + "↳ 1:00 PM - 2:20 PM · Tuesday, Thursday",
+		"`LEC 003`": indent + "↳ 10:00 AM - 11:20 AM · Tuesday, Thursday",
+		"`LAB 102`": indent + "↳ 11:30 AM - 12:20 PM · Friday",
+		"`TST 201`": indent + "↳ 6:00 PM - 7:50 PM · Monday",
 	}
 	found := 0
 	for i, ln := range lines {
@@ -335,10 +442,10 @@ func TestSearchViewShowsAScheduleUnderEverySection(t *testing.T) {
 	// Every section line, without exception, is followed by a bullet.
 	rows := 0
 	for i, ln := range lines {
-		if strings.HasPrefix(ln, "`") && strings.Contains(ln, "·") && strings.Contains(ln, "▰") {
+		if strings.HasPrefix(ln, "`") && strings.Contains(ln, "▰") {
 			rows++
-			if i+1 >= len(lines) || !strings.HasPrefix(lines[i+1], scheduleBullet+" ") {
-				t.Errorf("section line %q has no bullet beneath it", ln)
+			if i+1 >= len(lines) || !strings.HasPrefix(lines[i+1], indent+scheduleArrow+" ") {
+				t.Errorf("section line %q has no arrow line beneath it", ln)
 			}
 		}
 	}

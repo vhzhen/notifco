@@ -193,20 +193,32 @@ func seatsText(s store.Section) string {
 	}
 }
 
-// sectionRow renders one section as a line, e.g.
+// rowHead is the part of a section line every view shares: the name, the fill
+// bar and the counts.
+//
+//	`LEC 002` ▰▰▰▰▰▰▰▱ `99/100`
+func rowHead(s store.Section) string {
+	return fmt.Sprintf("`%s` %s `%d/%d`",
+		s.SectionName, fillBar(s.Enrolled, s.Capacity), s.Enrolled, s.Capacity)
+}
+
+// onlineSuffix marks online sections.
+func onlineSuffix(s store.Section) string {
+	if s.IsOnline {
+		return " · 🌐 online"
+	}
+	return ""
+}
+
+// sectionRow renders one section as a line, used by /watchlist and /watch:
 //
 //	`LEC 002` ▰▰▰▰▰▰▰▱ `99/100` · **1 seat open**
 //
 // Open versus full is carried by the text itself (bold "N seats open" against
-// plain "Full") and by the fill bar, rather than by a coloured dot.
+// plain "Full") and by the fill bar, rather than by a coloured dot. /search uses
+// searchSectionLine instead, which shows the class number in that slot.
 func sectionRow(s store.Section) string {
-	online := ""
-	if s.IsOnline {
-		online = " · 🌐 online"
-	}
-	return fmt.Sprintf("`%s` %s `%d/%d` · %s%s",
-		s.SectionName, fillBar(s.Enrolled, s.Capacity),
-		s.Enrolled, s.Capacity, seatsText(s), online)
+	return rowHead(s) + " · " + seatsText(s) + onlineSuffix(s)
 }
 
 // --- pagination -------------------------------------------------------------

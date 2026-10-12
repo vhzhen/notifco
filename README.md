@@ -19,16 +19,16 @@ Then, in any channel:
 /unwatch MATH 135           stop
 ```
 
-Each section shows its seats and, right under it, when it meets. Courses with more than 20 sections get **Previous / Next** buttons (MATH 135 has 25):
+Each section shows its fill, its 4-digit class number (the one you enter on Quest) and, indented underneath, when it meets. Courses with more than 20 sections get **Previous / Next** buttons (MATH 135 has 25):
 
 > **MATH 135 - Algebra for Honours Mathematics [Fall 2026]**
 > **25 sections** · 25 open · 0 full
 >
 > **Lectures**
-> `LEC 001` ▰▰▰▰▰▰▱▱ `90/120` · **30 seats open**
-> • 8:30 AM - 9:20 AM · Monday, Wednesday, Friday
-> `LEC 002` ▰▰▰▰▰▰▰▱ `109/120` · **11 seats open**
-> • 9:30 AM - 10:20 AM · Monday, Wednesday, Friday
+> `LEC 001` ▰▰▰▰▰▰▱▱ `90/120` · `5986`
+> &nbsp;&nbsp;&nbsp;&nbsp;↳ 8:30 AM - 9:20 AM · Monday, Wednesday, Friday
+> `LEC 002` ▰▰▰▰▰▰▰▱ `109/120` · `6254`
+> &nbsp;&nbsp;&nbsp;&nbsp;↳ 9:30 AM - 10:20 AM · Monday, Wednesday, Friday
 
 A section that meets at several times gets one line per time, and one with no scheduled time says `Time TBA` (or `Online`).
 
