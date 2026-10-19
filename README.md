@@ -74,60 +74,6 @@ One request returns **every section of a course**, so watching three sections of
 
 Full design in [DESIGN.md](./DESIGN.md). The UWFlow teardown that informed it is in [NOTES.md](./NOTES.md). Live API measurements are in [VERIFIED.md](./VERIFIED.md).
 
-## Numbers
-
-Measured, not estimated. Reproduce with `make load-test`.
-
-| | |
-|---|---|
-| 10,000 watchers on one opening | 616 ms to drain, **0 duplicates, 0 lost** |
-| Throughput | 16,231 msg/sec |
-| Detect a transition | 114 µs |
-| With Discord's real ~50 req/s ceiling | ~28 s for 10k DMs |
-| Tests | 65, all green under `-race` |
-| Running footprint | ~48 MB total (bot + Postgres + Redis) |
-
-Detection lag is bounded by the poll interval. End-to-end is **poll interval + a couple of seconds**; the upstream API exposes no "last updated" field, so the true seat-open instant is unknowable and notifco doesn't pretend otherwise.
-
-## Self-hosting
-
-MIT licensed and free to run. Two $0 paths:
-
-- **[Google Cloud](./deploy/gcp/README.md)** — always-free `e2-micro`. This is the one actually deployed and verified end to end.
-- **[Oracle Cloud](./deploy/oracle/README.md)** — always-free ARM VM, far more RAM.
-
-Locally:
-
-```sh
-git clone https://github.com/vhzhen/notifco.git && cd notifco
-cp .env.sample .env      # add DISCORD_TOKEN and DISCORD_APP_ID
-docker compose up -d
-```
-
-Leave `UW_API_KEY` empty and it runs on captured API fixtures — that's how CI works, with no secrets. For live data, [register a key](https://openapi.data.uwaterloo.ca/api-docs/) (returned instantly, no email confirmation) and set `NOTIFCO_SOURCE=uwapi`.
-
-```sh
-make help          # all targets
-make verify        # lint + build + race tests
-make load-test     # the 10k benchmark
-```
-
-**On a host with ~1 GB RAM, don't build in place** — the Go compiler thrashes swap instead of finishing. Cross-compile instead (~8 s):
-
-```sh
-make dist-linux    # then copy dist/notifco-linux-amd64 to the host
-docker compose -f docker-compose.yml -f docker-compose.prebuilt.yml up -d
-```
-
-Cloudflare and CloudFront can't host this: a Discord gateway bot holds a long-lived outbound WebSocket, so it needs a process that stays running, not a CDN or per-request serverless.
-
-## Limits
-
-- **Watched courses ≈ your rate limit**, at a 60 s interval. There's no bulk enrollment endpoint, so cost scales with distinct watched courses, and one request covers all sections of a course. The default 120 is UW's documented cap; ~266/min was measured sustained with no throttling, so raising it is viable. The client halves its own rate on a 429 and recovers on sustained success, so running above the documented figure degrades rather than breaks.
-- **No waitlist awareness.** The API exposes no waitlist or reserved-capacity field, so a section can report seats you personally can't take.
-- **Single poller.** The differ and notifier are safe to run concurrently; the poller would need a distributed lock.
-- Discord's rate limit dominates very large fan-outs. Nothing notifco can do about that.
-
 ## Data and privacy
 
 Seat counts, times and course titles come from the public [UW Open Data API v3](https://openapi.data.uwaterloo.ca/api-docs/), whose stated scope is publicly visible data only.
