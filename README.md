@@ -50,13 +50,6 @@ No account, no signup. Replies are private to you.
 
 notifco targets **under 60 seconds**.
 
-It also fixes a bug in UWFlow's detection. UWFlow tests "was this section full?" by comparing the old enrollment count against the *new* capacity:
-
-```sql
-WHERE o.enrollment_total >= n.enrollment_capacity
-```
-
-So when a department **raises capacity** on a full section — 100/100 becomes 100/120, meaning twenty seats just appeared — `100 >= 120` is false and no alert fires. That's one of the most valuable alerts there is, silently dropped. notifco compares old-vs-old. There's [a test](./internal/differ/differ_test.go) asserting both that notifco fires and that UWFlow's predicate wouldn't.
 
 ## How it works
 
