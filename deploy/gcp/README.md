@@ -199,6 +199,17 @@ is comfortable headroom; the 1 GB limit only bites when *compiling*.
 
 ### Upgrading later
 
+**Automatic (preferred).** Every push to `main` that passes CI is deployed by the
+`deploy` job in `.github/workflows/ci.yml`: it cross-compiles the binary on the
+runner, `scp`s it to the VM, runs `git pull --ff-only`, rebuilds the runtime image
+and waits for `/healthz`. It needs four repository secrets (`DEPLOY_HOST`,
+`DEPLOY_USER`, `DEPLOY_SSH_KEY`, `DEPLOY_KNOWN_HOSTS`); the public half of
+`DEPLOY_SSH_KEY` goes in the VM's `~/.ssh/authorized_keys` prefixed with `restrict `.
+If the VM's external IP is ephemeral it changes when the VM is stopped and started
+— reserve a static address or update `DEPLOY_HOST` and `DEPLOY_KNOWN_HOSTS`.
+
+**Manual:**
+
 ```sh
 # your machine
 make dist-linux

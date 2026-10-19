@@ -573,9 +573,13 @@ func alertEmbed(d store.Delivery, termName string) *discordgo.MessageEmbed {
 	if seats < 1 {
 		seats = 1
 	}
+	enroll := "Enroll on Quest now"
+	if d.ClassNumber > 0 {
+		enroll = fmt.Sprintf("Enroll on Quest using course code: **%d**", d.ClassNumber)
+	}
 	return &discordgo.MessageEmbed{
 		Title:       courseHeaderPrefixed("🔔 ", d.CourseCode, d.CourseTitle, termName),
-		Description: fmt.Sprintf("A seat just opened in **%s**. Enroll on Quest now — seats go fast.", d.SectionName),
+		Description: fmt.Sprintf("A seat just opened in **%s**. %s.", d.SectionName, enroll),
 		Color:       colorOpen,
 		Fields: []*discordgo.MessageEmbedField{
 			{Name: "Section", Value: "`" + d.SectionName + "`", Inline: true},

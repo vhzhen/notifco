@@ -58,6 +58,8 @@ type Delivery struct {
 	CourseTitle string
 	SectionName string
 	TermCode    string
+	// ClassNumber is the 4-digit code students enter on Quest to enroll.
+	ClassNumber int
 	Capacity    int
 	Enrolled    int
 	ObservedAt  time.Time
@@ -128,7 +130,7 @@ RETURNING n.id, n.subscription_id, n.attempts, n.throttles, n.transition_id,
 SELECT n.id, u.discord_user_id, COALESCE(u.dm_channel_id, ''),
        COALESCE(u.fallback_channel_id, ''),
        sec.course_code, sec.course_title, sec.section_name, sec.term_code,
-       sec.capacity, sec.enrolled, sec.observed_at
+       sec.class_number, sec.capacity, sec.enrolled, sec.observed_at
 FROM notifications n
 JOIN subscriptions sub ON sub.id = n.subscription_id
 JOIN users u           ON u.id = sub.user_id
@@ -145,7 +147,7 @@ WHERE n.id = ANY($1)`
 		var d Delivery
 		if err := hrows.Scan(&d.ID, &d.DiscordUserID, &d.DMChannelID,
 			&d.FallbackChannelID, &d.CourseCode, &d.CourseTitle, &d.SectionName,
-			&d.TermCode, &d.Capacity, &d.Enrolled, &d.ObservedAt); err != nil {
+			&d.TermCode, &d.ClassNumber, &d.Capacity, &d.Enrolled, &d.ObservedAt); err != nil {
 			return nil, fmt.Errorf("store: claim hydrate scan: %w", err)
 		}
 		cp := d

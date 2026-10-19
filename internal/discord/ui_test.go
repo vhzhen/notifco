@@ -479,10 +479,13 @@ func TestWatchlistViewEmptyAndGrouped(t *testing.T) {
 func TestAlertEmbedContent(t *testing.T) {
 	d := store.Delivery{
 		CourseCode: "math135", CourseTitle: "Algebra for Honours Mathematics",
-		SectionName: "LEC 002", TermCode: "1269",
+		SectionName: "LEC 002", TermCode: "1269", ClassNumber: 7105,
 		Capacity: 100, Enrolled: 99, SeatsOpen: 1, DetectedAt: time.Unix(1_790_000_000, 0),
 	}
 	e := alertEmbed(d, "Fall 2026")
+	if want := "Enroll on Quest using course code: **7105**"; !strings.Contains(e.Description, want) {
+		t.Errorf("description should contain %q: %q", want, e.Description)
+	}
 	if want := "🔔 MATH 135 - Algebra for Honours Mathematics [Fall 2026]"; e.Title != want {
 		t.Errorf("title = %q, want %q", e.Title, want)
 	}
