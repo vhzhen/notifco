@@ -21,6 +21,9 @@ coverage.*
 .env.*
 !.env.sample
 *.pem
+# The one public CA intermediate embedded via go:embed in schedpage. Not a
+# secret, and CI/docker builds fail without it.
+!/internal/source/schedpage/certs/*.pem
 *.key
 
 # Go workspace
