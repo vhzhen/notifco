@@ -139,11 +139,11 @@ func commands() []*discordgo.ApplicationCommand {
 		},
 		{
 			Name:        "unwatch",
-			Description: "Stop watching a section or a whole course",
+			Description: "Stop watching a section, a whole course, or everything (all)",
 			Options: []*discordgo.ApplicationCommandOption{
 				{
 					Name:         "code",
-					Description:  "Course code, e.g. CS 341",
+					Description:  "Course code, e.g. CS 341, or all to clear your watchlist",
 					Type:         discordgo.ApplicationCommandOptionString,
 					Required:     true,
 					Autocomplete: true,
@@ -546,6 +546,24 @@ func (b *Bot) cmdUnwatch(
 		return view{}, err
 	}
 
+	if isUnwatchAll(code) {
+		if strings.TrimSpace(sectionInput) != "" {
+			return noticeView(colorWarn, "Nothing removed",
+				"`/unwatch all` clears your whole watchlist and takes no section.\n\n"+
+					"To remove one section, use `/unwatch <course> <section>`."), nil
+		}
+		sections, courses, err := b.opts.Store.UnsubscribeAll(ctx, userID)
+		if err != nil {
+			return view{}, err
+		}
+		if sections == 0 {
+			return noticeView(colorWarn, "Nothing to remove", "You weren't watching anything."), nil
+		}
+		return noticeView(colorNeutral, "🛑 Stopped watching everything",
+			fmt.Sprintf("Removed **%s** across **%s**. Any alert not yet sent has been cancelled.",
+				plural(int(sections), "section"), plural(int(courses), "course"))), nil
+	}
+
 	if strings.TrimSpace(sectionInput) == "" {
 		n, err := b.opts.Store.UnsubscribeCourse(ctx, userID, string(b.opts.Term), norm)
 		if err != nil {
@@ -578,6 +596,15 @@ func (b *Bot) cmdUnwatch(
 	}
 	return noticeView(colorNeutral, "🛑 Stopped watching "+label,
 		fmt.Sprintf("Removed `%s`. Any alert not yet sent has been cancelled.", sec.SectionName)), nil
+}
+
+// unwatchAllKeyword is the /unwatch code value that clears the whole
+// watchlist. It cannot collide with a real course: a course code needs a
+// catalog number, which "all" does not have.
+const unwatchAllKeyword = "all"
+
+func isUnwatchAll(code string) bool {
+	return strings.EqualFold(strings.TrimSpace(code), unwatchAllKeyword)
 }
 
 // --- /watchlist -------------------------------------------------------------
@@ -627,7 +654,19 @@ func (b *Bot) handleAutocomplete(ctx context.Context, s *discordgo.Session, i *d
 
 	switch focused {
 	case "code":
-		if hits, err := b.opts.Store.SearchCourses(ctx, string(b.opts.Term), codeVal, 25); err == nil {
+		limit := 25
+		if data.Name == "unwatch" {
+			// Offer the "all" keyword while what is typed could still become it.
+			typed := strings.ToLower(strings.TrimSpace(codeVal))
+			if strings.HasPrefix(unwatchAllKeyword, typed) {
+				choices = append(choices, &discordgo.ApplicationCommandOptionChoice{
+					Name:  "all - every course on your watchlist",
+					Value: unwatchAllKeyword,
+				})
+				limit--
+			}
+		}
+		if hits, err := b.opts.Store.SearchCourses(ctx, string(b.opts.Term), codeVal, limit); err == nil {
 			for _, h := range hits {
 				label := courseLabel(h.CourseCode)
 				if h.CourseTitle != "" {

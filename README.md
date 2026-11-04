@@ -17,6 +17,7 @@ Then, in any channel:
 /watch MATH 135 LEC 002     get DMed when that section frees up
 /watchlist                  what you're watching
 /unwatch MATH 135           stop
+/unwatch all                stop watching everything
 ```
 
 Each section shows its fill, its 4-digit class number (the one you enter on Quest) and, indented underneath, when it meets. Courses with more than 20 sections get **Previous / Next** buttons (MATH 135 has 25):
@@ -80,7 +81,7 @@ Seat counts, times and course titles come from the public [UW Open Data API v3](
 
 Silence is not permission. If UW objects to this, disable it and open an issue.
 
-**Nothing behind a login is touched**: no Quest scraping, no credentials, no SourceAPI. The only thing stored about you is your Discord user ID and the sections you chose to watch. `/unwatch` removes the subscription and cancels any undelivered alert. Reserve notes are never stored.
+**Nothing behind a login is touched**: no Quest scraping, no credentials, no SourceAPI. The only thing stored about you is your Discord user ID and the sections you chose to watch. `/unwatch` removes the subscription and cancels any undelivered alert; `/unwatch all` does that for every section you watch. Reserve notes are never stored.
 
 UWFlow is MIT licensed and was read as a reference only; no code, SQL, or templates were copied.
 

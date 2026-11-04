@@ -810,6 +810,66 @@ func TestUnwatchStopsNotifications(t *testing.T) {
 	}
 }
 
+// TestUnwatchAllClearsEveryCourse verifies /unwatch all removes every section
+// of every course the user watches, drops their pending alerts, and leaves
+// other users' watches alone.
+func TestUnwatchAllClearsEveryCourse(t *testing.T) {
+	h := newHarness(t)
+	ctx := context.Background()
+
+	h.src.Script("cs985",
+		sections("cs985", 7030, 100, 100),
+		sections("cs985", 7030, 99, 100),
+	)
+	h.src.Script("cs984",
+		sections("cs984", 7031, 100, 100),
+		sections("cs984", 7031, 99, 100),
+	)
+	for _, c := range []string{"cs985", "cs984"} {
+		if _, err := h.pol.EnsureCourse(ctx, h.term, c); err != nil {
+			t.Fatal(err)
+		}
+	}
+	a, b := h.sectionID(7030), h.sectionID(7031)
+	uid := h.subscribe("user-unwatch-all", a, "chan-all")
+	h.subscribe("user-unwatch-all", b, "chan-all")
+	h.subscribe("user-bystander", a, "chan-by")
+
+	// Full observed, then the seats open: alerts are now pending, not sent.
+	if err := h.pol.RunOnce(ctx); err != nil {
+		t.Fatal(err)
+	}
+	if err := h.pol.RunOnce(ctx); err != nil {
+		t.Fatal(err)
+	}
+
+	secs, courses, err := h.store.UnsubscribeAll(ctx, uid)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if secs != 2 || courses != 2 {
+		t.Fatalf("UnsubscribeAll = (%d sections, %d courses), want (2, 2)", secs, courses)
+	}
+	if items, err := h.store.Watchlist(ctx, uid); err != nil || len(items) != 0 {
+		t.Fatalf("watchlist after unwatch all: %d items, err=%v", len(items), err)
+	}
+
+	if _, err := h.notif.DrainOnce(ctx); err != nil {
+		t.Fatal(err)
+	}
+	if got := len(h.fake.forUser("user-unwatch-all")); got != 0 {
+		t.Fatalf("delivered %d to user after unwatch all, want 0", got)
+	}
+	if got := len(h.fake.forUser("user-bystander")); got != 1 {
+		t.Fatalf("delivered %d to bystander, want 1", got)
+	}
+
+	// A second call is a no-op, not an error.
+	if secs, courses, err := h.store.UnsubscribeAll(ctx, uid); err != nil || secs != 0 || courses != 0 {
+		t.Fatalf("second UnsubscribeAll = (%d, %d, %v), want (0, 0, nil)", secs, courses, err)
+	}
+}
+
 // TestWatchedCoursesDedupesToCourses is the efficiency property that makes the
 // poller affordable: three watched sections of one course cost one request.
 func TestWatchedCoursesDedupesToCourses(t *testing.T) {

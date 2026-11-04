@@ -476,6 +476,58 @@ RETURNING id`
 	return affected, nil
 }
 
+// UnsubscribeAll deactivates every active subscription a user has, in every
+// term, so it empties exactly what Watchlist shows. It returns how many
+// sections were removed and how many distinct courses they belonged to.
+//
+// As with Unsubscribe, pending notifications for the removed subscriptions are
+// dropped and already-sent rows are kept.
+func (s *Store) UnsubscribeAll(ctx context.Context, userID int64) (sections, courses int64, err error) {
+	err = s.WithTx(ctx, func(tx pgx.Tx) error {
+		const q = `
+WITH upd AS (
+  UPDATE subscriptions SET active = FALSE
+  WHERE user_id = $1 AND active
+  RETURNING id, section_id)
+SELECT upd.id, sec.term_code, sec.course_code
+FROM upd JOIN sections sec ON sec.id = upd.section_id`
+		rows, err := tx.Query(ctx, q, userID)
+		if err != nil {
+			return err
+		}
+		var ids []int64
+		seen := make(map[[2]string]struct{})
+		for rows.Next() {
+			var (
+				id         int64
+				term, code string
+			)
+			if err := rows.Scan(&id, &term, &code); err != nil {
+				rows.Close()
+				return err
+			}
+			ids = append(ids, id)
+			seen[[2]string{term, code}] = struct{}{}
+		}
+		rows.Close()
+		if err := rows.Err(); err != nil {
+			return err
+		}
+		sections, courses = int64(len(ids)), int64(len(seen))
+		if len(ids) == 0 {
+			return nil
+		}
+		_, err = tx.Exec(ctx,
+			`DELETE FROM notifications WHERE subscription_id = ANY($1) AND status = 'pending'`,
+			ids)
+		return err
+	})
+	if err != nil {
+		return 0, 0, fmt.Errorf("store: unsubscribe all: %w", err)
+	}
+	return sections, courses, nil
+}
+
 // WatchItem is one row of a user's watchlist.
 type WatchItem struct {
 	SubscriptionID int64

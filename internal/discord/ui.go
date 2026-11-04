@@ -493,7 +493,7 @@ func watchlistView(items []store.WatchItem, termNames map[string]string, page in
 	}
 
 	body, cur, pages := renderPage(rows, page, pageSize)
-	desc := fmt.Sprintf("Watching **%s** · %d open now\n\n%s\n\n*Stop with `/unwatch <course> [section]`*",
+	desc := fmt.Sprintf("Watching **%s** · %d open now\n\n%s\n\n*Stop with `/unwatch <course> [section]`, or `/unwatch all` for everything*",
 		plural(len(items), "section"), open, body)
 
 	e := &discordgo.MessageEmbed{
