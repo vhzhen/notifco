@@ -493,7 +493,7 @@ func watchlistView(items []store.WatchItem, termNames map[string]string, page in
 	}
 
 	body, cur, pages := renderPage(rows, page, pageSize)
-	desc := fmt.Sprintf("Watching **%s** · %d open now\n\n%s\n\n*Stop with `/unwatch <course> [section]`, or `/unwatch all` for everything*",
+	desc := fmt.Sprintf("Watching **%s** · %d open now\n\n%s\n\n*Stop with `/unwatch <course> [section]`, or `/unwatchall` for everything*",
 		plural(len(items), "section"), open, body)
 
 	e := &discordgo.MessageEmbed{
@@ -527,6 +527,17 @@ func matchesView(query, termName string, hits []store.CourseHit) view {
 }
 
 // noticeView is a single-embed message for confirmations and errors.
+// unwatchAllView confirms /unwatchall, given how many sections and distinct
+// courses were removed.
+func unwatchAllView(sections, courses int64) view {
+	if sections == 0 {
+		return noticeView(colorWarn, "Nothing to remove", "You weren't watching anything.")
+	}
+	return noticeView(colorNeutral, "🛑 Stopped watching everything",
+		fmt.Sprintf("Removed **%s** across **%s**. Any alert not yet sent has been cancelled.",
+			plural(int(sections), "section"), plural(int(courses), "course")))
+}
+
 func noticeView(color int, title, desc string) view {
 	return view{embed: &discordgo.MessageEmbed{
 		Title:       truncateRunes(title, maxEmbedTitle),

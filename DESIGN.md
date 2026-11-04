@@ -67,7 +67,7 @@ Non-goals: registering users in courses, anything touching Quest, waitlist posit
                                │
    ┌───────────────────────────▼──────────────────────────────────────────────────┐
    │ DISCORD (discordgo)                                                          │
-   │  slash cmds: /search · /watch · /unwatch · /watchlist                        │
+   │  slash cmds: /search · /watch · /unwatch · /unwatchall · /watchlist          │
    │  deliver: DM ──(50007 DMs closed)──► fallback channel ping                   │
    └──────────────────────────────────────────────────────────────────────────────┘
                                │
@@ -472,7 +472,8 @@ replaceable: losing it degrades detection for one poll cycle and cannot cause du
 |---|---|
 | `/search <code>` | Searches the `sections` cache by course code (and title, trigram). Shows each section with `enrolled/capacity`, component, online flag, and an "as of" timestamp. Ephemeral. |
 | `/watch <code> <section>` | Resolves `(course, section)` for the active term, upserts user + subscription. Autocompletes `<section>` from the cache. Confirms with current seat state and the staleness disclaimer. |
-| `/unwatch <code> [section]` | Deactivates one subscription, or all sections of the course when `section` is omitted. `/unwatch all` deactivates every active subscription the caller has, across all terms (exactly what `/watchlist` shows). Pending alerts for removed subscriptions are dropped. |
+| `/unwatch <code> [section]` | Deactivates one subscription, or all sections of the course when `section` is omitted. |
+| `/unwatchall` | Deactivates every active subscription the caller has, across all terms (exactly what `/watchlist` shows). Takes no options. Pending alerts for removed subscriptions are dropped. |
 | `/watchlist` | Lists the caller's active subscriptions with live seat counts. Ephemeral. |
 
 Behaviour details:

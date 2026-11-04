@@ -810,7 +810,7 @@ func TestUnwatchStopsNotifications(t *testing.T) {
 	}
 }
 
-// TestUnwatchAllClearsEveryCourse verifies /unwatch all removes every section
+// TestUnwatchAllClearsEveryCourse verifies /unwatchall removes every section
 // of every course the user watches, drops their pending alerts, and leaves
 // other users' watches alone.
 func TestUnwatchAllClearsEveryCourse(t *testing.T) {
@@ -851,14 +851,14 @@ func TestUnwatchAllClearsEveryCourse(t *testing.T) {
 		t.Fatalf("UnsubscribeAll = (%d sections, %d courses), want (2, 2)", secs, courses)
 	}
 	if items, err := h.store.Watchlist(ctx, uid); err != nil || len(items) != 0 {
-		t.Fatalf("watchlist after unwatch all: %d items, err=%v", len(items), err)
+		t.Fatalf("watchlist after unwatchall: %d items, err=%v", len(items), err)
 	}
 
 	if _, err := h.notif.DrainOnce(ctx); err != nil {
 		t.Fatal(err)
 	}
 	if got := len(h.fake.forUser("user-unwatch-all")); got != 0 {
-		t.Fatalf("delivered %d to user after unwatch all, want 0", got)
+		t.Fatalf("delivered %d to user after unwatchall, want 0", got)
 	}
 	if got := len(h.fake.forUser("user-bystander")); got != 1 {
 		t.Fatalf("delivered %d to bystander, want 1", got)
